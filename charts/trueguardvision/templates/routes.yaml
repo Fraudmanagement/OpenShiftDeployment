@@ -1,0 +1,93 @@
+# Taban: yamls/50-routes.yaml — compose'daki nginx edge'in Route karşılığı
+{{- if .Values.routes.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: fm-ui
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    haproxy.router.openshift.io/timeout: 120s
+spec:
+  host: {{ include "trueguardvision.fmHost" . }}
+  to:
+    kind: Service
+    name: fraudbuster-ui
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: fm-backend
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    haproxy.router.openshift.io/timeout: 60s
+    # nginx: rewrite ^/api/backend/(.*)$ /$1
+    haproxy.router.openshift.io/rewrite-target: /
+spec:
+  host: {{ include "trueguardvision.fmHost" . }}
+  path: /api/backend
+  to:
+    kind: Service
+    name: fraudbuster-be
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: fm-poc-api
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # POC reset / ağır admin çağrıları için uzun timeout (nginx: 600s)
+    haproxy.router.openshift.io/timeout: 600s
+spec:
+  host: {{ include "trueguardvision.fmHost" . }}
+  path: /api/poc
+  to:
+    kind: Service
+    name: fraudbuster-ui
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: sim-ui
+  namespace: {{ .Release.Namespace }}
+spec:
+  host: {{ include "trueguardvision.simHost" . }}
+  to:
+    kind: Service
+    name: eventsimulator-ui
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: sim-engine
+  namespace: {{ .Release.Namespace }}
+spec:
+  host: {{ include "trueguardvision.simEngineHost" . }}
+  to:
+    kind: Service
+    name: eventsimulator-engine
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+{{- end }}

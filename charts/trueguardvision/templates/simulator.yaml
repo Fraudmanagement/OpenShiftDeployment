@@ -1,0 +1,155 @@
+# Taban: yamls/40-simulator.yaml — Event Simulator Engine + Web UI
+# NOT: eventsimulator-ui image'ının NEXT_PUBLIC_ENGINE_URL'i runtime'da okuyan
+# düzeltilmiş build'i gerektirir (eski build hostname:3100'e sabitliydi).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eventsimulator-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: eventsimulator-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eventsimulator-engine
+  template:
+    metadata:
+      labels:
+        app: eventsimulator-engine
+    spec:
+      {{- $fp := .Values.simulator.engine.fraudEnginePlacement }}
+      {{- if not (has $fp (list "colocate" "separate" "none")) }}
+      {{- fail (printf "simulator.engine.fraudEnginePlacement gecersiz: %q (colocate|separate|none)" $fp) }}
+      {{- end }}
+      {{- if eq $fp "colocate" }}
+      # Yük üreteci, FM Engine ile AYNI node'a yerleşmek zorunda
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: fraudbuster-be
+              topologyKey: kubernetes.io/hostname
+      {{- else if eq $fp "separate" }}
+      # Yük üreteci, FM Engine'den FARKLI node'a yerleşmek zorunda (ölçüm safiyeti)
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: fraudbuster-be
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
+      imagePullSecrets:
+        - name: {{ .Values.imagePullSecret.name }}
+      {{- with .Values.simulator.engine.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.simulator.engine.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: engine
+          image: {{ .Values.simulator.engine.image }}
+          imagePullPolicy: {{ .Values.simulator.engine.pullPolicy }}
+          ports:
+            - containerPort: 7070
+              name: http
+          env:
+            - name: SIMULATOR_PORT
+              value: {{ .Values.simulator.engine.port | quote }}
+            - name: SIMULATOR_DB
+              value: {{ .Values.simulator.engine.db | quote }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+{{ toYaml .Values.simulator.engine.resources | indent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 7070
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 7070
+            initialDelaySeconds: 20
+            periodSeconds: 30
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eventsimulator-engine
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: eventsimulator-engine
+  ports:
+    - port: 7070
+      targetPort: 7070
+      name: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eventsimulator-ui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: eventsimulator-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eventsimulator-ui
+  template:
+    metadata:
+      labels:
+        app: eventsimulator-ui
+    spec:
+      imagePullSecrets:
+        - name: {{ .Values.imagePullSecret.name }}
+      containers:
+        - name: ui
+          image: {{ .Values.simulator.ui.image }}
+          imagePullPolicy: {{ .Values.simulator.ui.pullPolicy }}
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: {{ .Values.simulator.ui.nodeEnv | quote }}
+            # Tarayıcının engine'e gideceği DIŞ adres (Route).
+            # Yeni image runtime'da ENGINE_PUBLIC_URL okur (window._ENGINE_URL_);
+            # NEXT_PUBLIC_ENGINE_URL eski build'lerle uyumluluk için duruyor.
+            - name: ENGINE_PUBLIC_URL
+              value: "https://{{ include "trueguardvision.simEngineHost" . }}"
+            - name: NEXT_PUBLIC_ENGINE_URL
+              value: "https://{{ include "trueguardvision.simEngineHost" . }}"
+          resources:
+{{ toYaml .Values.simulator.ui.resources | indent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: eventsimulator-ui
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: eventsimulator-ui
+  ports:
+    - port: 3000
+      targetPort: 3000
+      name: http

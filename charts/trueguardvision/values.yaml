@@ -1,0 +1,161 @@
+# =============================================================================
+# TrueGuardVision — Helm values (nötr taban; compose fallback değerleri)
+# Üretim profili values-customer.yaml ile -f üzerinden
+# seçilir; her iki profil de TÜM alanları explicit içerir.
+# =============================================================================
+
+# Cluster'ın uygulama (Route) domain'i — host'lar fm./sim./sim-engine. önekleriyle türetilir
+clusterDomain: "apps.example.com"
+
+imagePullSecret:
+  create: true
+  name: ghcr-pull
+  registry: ghcr.io
+  username: fraudmanagement
+  token: ""             # GitHub PAT (read:packages) — dosyaya yazmayın, --set ile verin
+
+auth:
+  jwtSecret: "change-me-generate-with-openssl-rand-base64-48"
+  adminEmail: "admin@fm.com"
+  adminPassword: "ChangeMeAdmin!"
+
+externalDatabases:
+  mongodb:
+    # Change stream'ler için replicaSet=rs0 + directConnection=true ŞART
+    uri: "mongodb://MONGO_VM_IP:27017/fraudmanagement?replicaSet=rs0&directConnection=true&maxPoolSize=50&minPoolSize=10&maxIdleTimeMS=60000&waitQueueTimeoutMS=5000&serverSelectionTimeoutMS=5000"
+    database: "fraudmanagement"
+  clickhouse:
+    url: "http://CLICKHOUSE_VM_IP:8123"
+    database: "fraudbuster"
+    user: "default"
+    password: "ChangeMeClickHouse!"
+
+dragonfly:
+  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0
+  pullPolicy: "Always"
+  maxmemory: "4gb"
+  proactorThreads: 4
+  storage: 10Gi
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    requests:
+      cpu: "1"
+      memory: 4Gi
+    limits:
+      cpu: "2"
+      memory: 6Gi
+
+engine:
+  image: ghcr.io/fraudmanagement/fraudengine:main
+  pullPolicy: "Always"
+  logLevel: info
+  rustLog: info
+  logFormat: "json"
+  rustBacktrace: "1"
+  serverPort: "5432"        # Service/Route/probe portlarıyla birlikte düşünülmeli
+  pluginDir: "/app/plugins"
+  redisUri: "redis://dragonfly:6379?pool_size=300&min_idle=50&connection_timeout=3&response_timeout=5"
+  bucketTtlSeconds: "86400"
+  enableChangeStreams: "true"
+  # Deployment güncelleme davranışı: Recreate (önce eskiyi kaldır — dar cluster için) | RollingUpdate
+  updateStrategy: "Recreate"
+  nodeSelector: {}
+  tolerations: []
+  # Dragonfly'a göre yerleşim: colocate (aynı node) | separate (farklı node) | none (serbest)
+  dragonflyPlacement: "none"
+  resources:
+    requests:
+      cpu: "2"
+      memory: 4Gi
+    limits:
+      cpu: "4"
+      memory: 8Gi
+  # Tuning map: her satır engine container'ına environment variable olarak basılır.
+  # Yapısal env'ler (bağlantı/kimlik) burada tanımlanamaz — template reddeder.
+  tuning:
+    FRAUDBUSTER_THREAD_POOL_SIZE: "32"
+    FRAUDBUSTER_CLICKHOUSE_BATCH_SIZE: "1000"
+    FRAUDBUSTER_CLICKHOUSE_FLUSH_INTERVAL_SECS: "2"
+    FRAUDBUSTER_DISABLE_PHASE_C_BUCKET_WRITES: "false"
+    FRAUDBUSTER_DEFER_PHASE_C_BUCKET_WRITES: "true"
+    FRAUDBUSTER_MAX_CONCURRENT_DEFERRED_BUCKET_WRITES: "1024"
+    FRAUDBUSTER_REUSE_RULE_PHASE_BUCKET_READS: "true"
+    FRAUDBUSTER_ENABLE_FEATURE_GRAPH_POST_TASKS: "false"
+    FRAUDBUSTER_MAX_CONCURRENT_POST_TASKS: "1024"
+    FRAUDBUSTER_BACKGROUND_WORKER_THREADS: "4"
+    FRAUDBUSTER_MAX_CONCURRENT_DRAGONFLY_WRITE_PIPELINES: "32"
+    FRAUDBUSTER_MAX_CONCURRENT_DRAGONFLY_READ_PIPELINES: "16"
+    FRAUDBUSTER_MAX_CONCURRENT_BACKGROUND_DRAGONFLY_READ_PIPELINES: "4"
+    FRAUDBUSTER_DRAGONFLY_POOL_SIZE: "48"
+    FRAUDBUSTER_DISABLE_INCIDENT_CREATION: "false"
+    FRAUDBUSTER_DISABLE_CLICKHOUSE_EVENT_WRITES: "false"
+    FRAUDBUSTER_DISABLE_ACTOR_HASH_TTL: "false"
+    FRAUDBUSTER_SET_REFRESH_GRANULARITY_PERCENT: "10"
+    FRAUDBUSTER_ENABLE_PROFILING_ENDPOINT: "false"
+    FRAUDBUSTER_MAX_CONCURRENT_BUCKET_TASKS: "100"
+    FRAUDBUSTER_BUCKET_QUEUE_CAPACITY: "20000"
+    FRAUDBUSTER_BUCKET_BACKLOG_WARN_THRESHOLD: "1000"
+    FRAUDBUSTER_MAX_CONCURRENT_INCIDENT_TASKS: "64"
+    FRAUDBUSTER_INCIDENT_QUEUE_CAPACITY: "50000"
+    FRAUDBUSTER_INCIDENT_BATCH_SIZE: "500"
+    FRAUDBUSTER_INCIDENT_FLUSH_INTERVAL_MS: "250"
+
+ui:
+  image: ghcr.io/fraudmanagement/fraudbuster:main
+  pullPolicy: "Always"
+  nodeEnv: "production"
+  nextTelemetryDisabled: "1"
+  demoMode: "false"
+  enablePocReset: "true"    # gerçek production'da false
+  jwtExpiresIn: "7d"
+  mongooseAutoIndex: "false"
+  backendUrl: "http://fraudbuster-be:5432"
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  tuning:
+    INCIDENTS_GROUPS_LEGACY_AGGREGATION: "false"
+    INCIDENTS_FILTER_GLOBAL_MAX_DAYS: "31"
+    INCIDENTS_FILTER_PROJECT_MAX_DAYS: "90"
+    INCIDENTS_FILTER_MAX_TIME_MS: "5000"
+    INCIDENTS_FILTERED_SLOW_MS: "1000"
+    INCIDENTS_SUMMARY_SLOW_MS: "300"
+    CLICKHOUSE_MAX_CONNECTIONS: "20"
+
+simulator:
+  engine:
+    image: ghcr.io/fraudmanagement/eventsimulator-engine:latest
+    pullPolicy: "Always"
+    port: "7070"
+    db: "/data/simulator.db"
+    # FM Engine'e göre yerleşim: colocate (aynı node) | separate (farklı node) | none (serbest)
+    fraudEnginePlacement: "none"
+    resources:
+      requests:
+        cpu: "1"
+        memory: 2Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+  ui:
+    image: ghcr.io/fraudmanagement/eventsimulator-ui:latest
+    pullPolicy: "Always"
+    nodeEnv: "production"
+    resources:
+      requests:
+        cpu: "250m"
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+
+routes:
+  enabled: true
+  fmHost: ""
+  simHost: ""
+  simEngineHost: ""

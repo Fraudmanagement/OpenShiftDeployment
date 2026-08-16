@@ -1,0 +1,159 @@
+# Taban: yamls/20-engine.yaml — FraudBuster Backend Engine (Rust)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraudbuster-be
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: fraudbuster-be
+spec:
+  replicas: 1
+  {{- if not (has .Values.engine.updateStrategy (list "Recreate" "RollingUpdate")) }}
+  {{- fail (printf "engine.updateStrategy gecersiz: %q (Recreate|RollingUpdate)" .Values.engine.updateStrategy) }}
+  {{- end }}
+  strategy:
+    type: {{ .Values.engine.updateStrategy }}
+  selector:
+    matchLabels:
+      app: fraudbuster-be
+  template:
+    metadata:
+      labels:
+        app: fraudbuster-be
+    spec:
+      {{- $dp := .Values.engine.dragonflyPlacement }}
+      {{- if not (has $dp (list "colocate" "separate" "none")) }}
+      {{- fail (printf "engine.dragonflyPlacement gecersiz: %q (colocate|separate|none)" $dp) }}
+      {{- end }}
+      {{- if eq $dp "colocate" }}
+      # FM Engine, Dragonfly ile AYNI node'a yerleşmek zorunda
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: dragonfly
+              topologyKey: kubernetes.io/hostname
+      {{- else if eq $dp "separate" }}
+      # FM Engine, Dragonfly'dan FARKLI node'a yerleşmek zorunda
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: dragonfly
+              topologyKey: kubernetes.io/hostname
+      {{- end }}
+      imagePullSecrets:
+        - name: {{ .Values.imagePullSecret.name }}
+      {{- with .Values.engine.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.engine.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: engine
+          image: {{ .Values.engine.image }}
+          imagePullPolicy: {{ .Values.engine.pullPolicy }}
+          ports:
+            - containerPort: 5432
+              name: http
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.engine.rustLog | quote }}
+            - name: LOG_FORMAT
+              value: {{ .Values.engine.logFormat | quote }}
+            - name: RUST_BACKTRACE
+              value: {{ .Values.engine.rustBacktrace | quote }}
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fraudbuster-secrets
+                  key: JWT_SECRET
+            - name: FRAUDBUSTER_MONGODB_URI
+              valueFrom:
+                configMapKeyRef:
+                  name: external-db
+                  key: FRAUDBUSTER_MONGODB_URI
+            - name: FRAUDBUSTER_MONGODB_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: external-db
+                  key: MONGODB_DATABASE
+            - name: FRAUDBUSTER_REDIS_URI
+              value: {{ .Values.engine.redisUri | quote }}
+            - name: FRAUDBUSTER_CLICKHOUSE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: external-db
+                  key: FRAUDBUSTER_CLICKHOUSE_URL
+            - name: FRAUDBUSTER_CLICKHOUSE_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: external-db
+                  key: CLICKHOUSE_DATABASE
+            - name: FRAUDBUSTER_CLICKHOUSE_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: external-db
+                  key: CLICKHOUSE_USER
+            - name: FRAUDBUSTER_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fraudbuster-secrets
+                  key: CLICKHOUSE_PASSWORD
+            - name: FRAUDBUSTER_SERVER_PORT
+              value: {{ .Values.engine.serverPort | quote }}
+            - name: FRAUDBUSTER_LOG_LEVEL
+              value: {{ .Values.engine.logLevel | quote }}
+            - name: FRAUDBUSTER_ENABLE_CHANGE_STREAMS
+              value: {{ .Values.engine.enableChangeStreams | quote }}
+            - name: FRAUDBUSTER_BUCKET_TTL_SECONDS
+              value: {{ .Values.engine.bucketTtlSeconds | quote }}
+            # Tuning map (values: engine.tuning) — yapısal env'ler burada tanımlanamaz
+            {{- $reserved := list "RUST_LOG" "LOG_FORMAT" "RUST_BACKTRACE" "JWT_SECRET" "FRAUDBUSTER_MONGODB_URI" "FRAUDBUSTER_MONGODB_DATABASE" "FRAUDBUSTER_REDIS_URI" "FRAUDBUSTER_CLICKHOUSE_URL" "FRAUDBUSTER_CLICKHOUSE_DATABASE" "FRAUDBUSTER_CLICKHOUSE_USER" "FRAUDBUSTER_CLICKHOUSE_PASSWORD" "FRAUDBUSTER_SERVER_PORT" "FRAUDBUSTER_LOG_LEVEL" "FRAUDBUSTER_ENABLE_CHANGE_STREAMS" "FRAUDBUSTER_BUCKET_TTL_SECONDS" "FRAUDBUSTER_DRAGONFLY_SHARD_COUNT" "PLUGIN_DIR" }}
+            {{- range $k, $v := .Values.engine.tuning }}
+            {{- if has $k $reserved }}
+            {{- fail (printf "engine.tuning icinde yapisal env tanimlanamaz: %s" $k) }}
+            {{- end }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            - name: PLUGIN_DIR
+              value: {{ .Values.engine.pluginDir | quote }}
+          volumeMounts:
+            - name: plugins
+              mountPath: /app/plugins
+          resources:
+{{ toYaml .Values.engine.resources | indent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5432
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5432
+            initialDelaySeconds: 40
+            periodSeconds: 30
+      volumes:
+        - name: plugins
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fraudbuster-be
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: fraudbuster-be
+  ports:
+    - port: 5432
+      targetPort: 5432
+      name: http

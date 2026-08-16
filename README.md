@@ -1,0 +1,394 @@
+# TrueGuardVision — OpenShift Helm Chart
+
+TrueGuardVision fraud yönetim platformunun OpenShift üzerinde Helm ile
+kurulumu için hazırlanmıştır. Bu doküman kurulum, kullanım, yapılandırma ve
+işletmeye dair başvuru kaynağıdır.
+
+## İçindekiler
+
+1. [Sistem Genel Bakış](#1-sistem-genel-bakış)
+2. [Ortam ve Boyutlandırma](#2-ortam-ve-boyutlandırma)
+3. [Kurulum ve Yaşam Döngüsü](#3-kurulum-ve-yaşam-döngüsü)
+4. [Kullanım](#4-kullanım)
+5. [Kapsam (OpenShift içi ve dışı)](#5-kapsam-openshift-içi-ve-dışı)
+6. [Values Referansı](#6-values-referansı)
+7. [Güvenlik ve Ağ](#7-güvenlik-ve-ağ)
+
+---
+
+## 1. Sistem Genel Bakış
+
+### Bileşenler
+
+| Bileşen | Görev | Çalıştığı Yer |
+|---|---|---|
+| **FM Engine** (`fraudbuster-be`) | Event skorlama, kural değerlendirme, incident üretimi (Rust) | OpenShift |
+| **FM Portal** (`fraudbuster-ui`) | Analist arayüzü: kural/aksiyon/liste yönetimi, incident takibi, raporlama | OpenShift |
+| **Dragonfly** (`dragonfly`) | Redis uyumlu bellek-içi veri deposu; aktör profilleri, kayan pencere sayaçları (bucket), listeler — skorlamanın sıcak yolu | OpenShift |
+| **Event Simulator** (`eventsimulator-engine` / `-ui`) | Yük üreteci ve test arayüzü; yalnızca test/POC amaçlıdır, ürünün parçası değildir | OpenShift |
+| **MongoDB** | Kural/aksiyon/liste tanımları, kullanıcı ve roller, incident kayıtları; change stream ile Engine'e canlı yapılandırma akışı | **OpenShift dışı** (banka ağında VM) |
+| **ClickHouse** | İşlenen tüm event'lerin kalıcı arşivi ve analitik sorgular (sütunsal OLAP veritabanı) | **OpenShift dışı** (banka ağında VM) |
+
+### Akış (özet)
+
+```
+  Event Kaynağı                 ┌──────────────────── OpenShift ────────────────────┐
+  (POC'de: Event Simulator,    │                                                    │
+   üretimde: banka sistemleri) │   FM ENGINE ◄────────► DRAGONFLY (sayaçlar, RAM)   │
+        │  POST /events (JWT)  │      │                                             │
+        └──────────────────────┼─────►│  1. sayaçları oku/güncelle                  │
+                               │      │  2. kuralları çalıştır                      │
+  Fraud Analisti               │      │  3. tetiklenirse → MongoDB'ye incident      │
+        │ HTTPS (Route)        │      │  4. event'i → ClickHouse'a arşivle (async)  │
+        └──────────────────────┼─► FM PORTAL                                        │
+                               │      │  kural/liste tanımı → MongoDB               │
+                               └──────┼─────────────────────────────────────────────┘
+                                      ▼
+                    MongoDB (yapılandırma + incident)      ClickHouse (arşiv + rapor)
+                    — change stream ile kural değişikliği   — Portal raporları buradan
+                      Engine'e anında yansır                  sorgular
+```
+
+---
+
+## 2. Ortam ve Boyutlandırma
+
+Chart, üretim boyutlandırmasını içeren profil dosyasıyla kurulur:
+`values-customer.yaml` (kaynak: ürün paketindeki `env.template`). Taban
+`values.yaml` compose fallback değerlerini taşır ve her kurulumda otomatik
+yüklenir; profil kurulumda `-f` ile verilir.
+
+### Önerilen POC kapasitesi (ürün dokümanındaki hedef mimari)
+
+| Bileşen | CPU / RAM / Disk | Yerleşim |
+|---|---|---|
+| FM Engine | 32 CPU / 64 GB / 200 GB | OpenShift — dedicated hot-path worker |
+| Dragonfly | 32 CPU / 64 GB / 300 GB | OpenShift — Engine ile AYNI worker (podAffinity) |
+| Hot-path worker node | ≥ 70 CPU / ≥ 140 GB | `fm-hotpath=true` label + taint; yalnız Engine+Dragonfly |
+| FM Portal | 8 CPU / 8 GB / 50 GB | OpenShift — genel worker |
+| Event Simulator Engine | 16 CPU / 16 GB / 100 GB | OpenShift — Engine'den FARKLI worker (ölçüm saflığı) |
+| Event Simulator UI | 2 CPU / 4 GB | OpenShift — genel worker |
+| MongoDB VM | 16 CPU / 32 GB / 300 GB | Cluster dışı, banka ağı, rs0 |
+| ClickHouse VM | 16 CPU / 32 GB / 1 TB | Cluster dışı, banka ağı |
+
+Not: `FRAUDBUSTER_DRAGONFLY_SHARD_COUNT` env'i bilinçli olarak
+kullanılmamaktadır — Engine, shard sayısını bağlantı sırasında Dragonfly'dan
+(`INFO thread_count`) otomatik öğrenir; tek ayar noktası
+`dragonfly.proactorThreads` alanıdır.
+
+---
+
+## 3. Kurulum ve Yaşam Döngüsü
+
+### Ön koşullar
+
+- OpenShift 4.x cluster'ı ve proje oluşturma yetkisi (`oc` girişi yapılmış olmalı)
+- MongoDB (replica set `rs0`) ve ClickHouse'un banka ağında kurulu ve
+  cluster'dan erişilebilir olması (bkz. Bölüm 4)
+- `ghcr.io/fraudmanagement` imajları için erişim token'ı (ya da imajların
+  banka registry'sine mirror edilmiş olması)
+
+### Kurulum
+
+**Pod yerleşimi:** İki values alanı, kritik pod'ların birbirine göre
+yerleşimini yönetir; ikisi de aynı üç değeri alır
+(`colocate` / `separate` / `none`):
+
+| Alan | Neyi yönetir |
+|---|---|
+| `engine.dragonflyPlacement` | FM Engine'in **Dragonfly'a** göre yerleşimi |
+| `simulator.engine.fraudEnginePlacement` | Event Simulator engine'inin **FM Engine'e** göre yerleşimi |
+
+| Değer | Davranış | Ne zaman |
+|---|---|---|
+| `colocate` | İlgili pod'lar AYNI node'a yerleşir (podAffinity, zorunlu) | Node kapasitesi iki iş yükünün limit toplamına bol geliyorsa (örn. adanmış ≥70 CPU worker) — node içi trafik, ağ gecikmesini sıfırlar |
+| `separate` | İlgili pod'lar FARKLI node'lara yerleşir (podAntiAffinity, zorunlu) | Dar node'larda CPU çekişmesini önlemek için; yük üreteci için her durumda önerilir (ölçüm sağlığı) |
+| `none` | Kural yok; scheduler serbest | Yerleşim önemli değilse |
+
+Varsayılan (`values-customer.yaml`): `dragonflyPlacement: separate`,
+`fraudEnginePlacement: separate`.
+
+Ölçüm notu: Bu chart'ın doğrulandığı test ortamında (2× 8 vCPU worker,
+10.000 TPS, 1M müşteri) en iyi sonuç **her iki alanın `separate`** olduğu
+yerleşimle alınmıştır (p99 ≈ 9 ms; `colocate` aynı testte p99 ≈ 13 ms).
+Dar node'larda CPU çekişmesi, node içi ağ kazancından daha belirleyicidir.
+Geniş/adanmış node'larda (ör. ≥70 CPU hot-path worker) `colocate`'in
+davranışı henüz ölçülmemiştir — hedef ortamda ayrıca araştırılması önerilir.
+Zorunlu kurallar kullanılıyorsa cluster'da en az 2 worker node olmalıdır.
+
+Aşağıdaki tüm komutlar repo kökünden (bu README'nin bulunduğu dizinden, chart
+yolu `./charts/trueguardvision` olacak şekilde) çalıştırılır.
+
+Chart iki values katmanıyla çalışır: `values.yaml` her kurulumda otomatik
+yüklenen tabandır; üzerine `-f` ile `values-customer.yaml` verilir.
+
+**Müşteri kurulumu** (üretim boyutlandırması):
+
+Kurulumdan önce `values-customer.yaml` içinde doldurun: `MONGO_VM_IP`,
+`CLICKHOUSE_VM_IP` ve `ChangeMe*` parolaları. Kurulum komutu:
+
+```bash
+helm install trueguardvision ./charts/trueguardvision -n fraud-poc --create-namespace \
+  -f charts/trueguardvision/values-customer.yaml \
+  --set clusterDomain=apps.rosa.altay.6j68.p3.openshiftapps.com \
+  --set imagePullSecret.token=ghp_****
+```
+
+(Domain örnektir, kendi domain'inizle değiştirin.)
+
+Alternatif: bu iki `--set` yerine değerleri `values-customer.yaml` içine de
+yazabilirsiniz — `clusterDomain` dosyanın başındaki alana,
+token `imagePullSecret:` bloğundaki `token:` alanına:
+
+```yaml
+clusterDomain: "apps.<sizin-cluster-domain>"
+
+imagePullSecret:
+  token: "ghp_****"     # önerilmez — güvenlik notuna bakın
+```
+
+Güvenlik notu: token'ı dosyaya açık yazmayın (version control'e sızar) —
+token için önerilen yol `--set`'tir. `clusterDomain` doldurulmadan kurulum
+Route host doğrulamasında hata verir; bu beklenen davranıştır.
+
+### Güncelleme (values değiştiğinde)
+
+Adım adım:
+
+1. Değişikliği yapın — ya values dosyasında ilgili alanı düzenleyin ya da
+   `--set` ile verin.
+2. `helm upgrade` çalıştırın. Kural: **kurulumda kullandığınız `-f` ve
+   `--set` parametrelerinin AYNISINI verin** (helm her seferinde tam değer
+   setiyle çalışır; eksik verilen parametre varsayılana geri döner):
+
+```bash
+helm upgrade trueguardvision ./charts/trueguardvision -n fraud-poc \
+  -f charts/trueguardvision/values-customer.yaml \
+  --set clusterDomain=apps.<domain> \
+  --set imagePullSecret.token=ghp_****
+```
+
+3. Ne olacağını bilin: yalnızca spec'i değişen pod'lar yeniden oluşturulur.
+   **FM Engine `Recreate` stratejisiyle güncellenir: önce eski pod
+   durdurulur, sonra yenisi kurulur** — arada ~30-60 saniyelik kesinti
+   olur. Bu bilinçli bir tercihtir: Engine'in yüksek CPU request'i nedeniyle
+   klasik rolling update dar cluster'larda yeni pod'a yer bulamayıp sonsuza
+   kadar Pending kalır.
+4. Doğrulayın: `oc get pods -n fraud-poc` — tüm pod'lar `1/1 Running`
+   olmalı. Sorun varsa geri dönün:
+
+```bash
+helm history trueguardvision -n fraud-poc          # revizyon listesi
+helm rollback trueguardvision <REVIZYON> -n fraud-poc
+```
+
+Aynı imaj tag'iyle yeni yayınlanan imajı çekmek için (values değişikliği
+gerektirmez): `oc rollout restart deploy/<ad> -n fraud-poc`
+
+### Kaldırma (silme prosedürü)
+
+Adım adım tam kaldırma:
+
+1. Helm release'ini kaldırın — tüm Deployment/Service/Route'lar silinir:
+
+```bash
+helm uninstall trueguardvision -n fraud-poc
+```
+
+2. Dragonfly'ın kalıcı diskini silin (aşağıdaki nota bakın):
+
+```bash
+oc delete pvc data-dragonfly-0 -n fraud-poc
+```
+
+3. (İsteğe bağlı) Namespace'i tamamen kaldırın:
+
+```bash
+oc delete ns fraud-poc
+```
+
+Yeniden kurulum, Kurulum bölümündeki `helm install` komutuyla yapılır
+(namespace silindiyse `--create-namespace` onu yeniden oluşturur).
+
+Not — `helm uninstall`, Dragonfly'ın kalıcı diskini (PVC) **silmez** — StatefulSet
+`volumeClaimTemplates` ile oluşturulan PVC'ler Helm tarafından yönetilmez ve
+veri koruması amacıyla geride bırakılır (retain davranışı). Yeniden kurulumda
+aynı PVC otomatik bağlanır ve sayaç verisi korunur. Tamamen temizlemek için:
+
+```bash
+oc delete pvc data-dragonfly-0 -n fraud-poc
+```
+
+Not: Dragonfly verisi yeniden üretilebilir niteliktedir (sayaçlar canlı
+trafikle yeniden dolar); kalıcı gerçek veri MongoDB ve ClickHouse'tadır.
+
+### Üretilecek manifest'leri önizleme
+
+```bash
+helm template trueguardvision ./charts/trueguardvision
+```
+
+---
+
+## 4. Kullanım
+
+### Erişim adresleri
+
+Kurulum sonrası (varsayılan host şablonu `<ad>.<clusterDomain>`):
+
+| Arayüz | Adres | Not |
+|---|---|---|
+| FM Portal | `https://fm.<clusterDomain>` | İlk giriş: `auth.adminEmail` / `auth.adminPassword` |
+| Event Simulator | `https://sim.<clusterDomain>` | Test arayüzü |
+| Simulator Engine API | `https://sim-engine.<clusterDomain>/api/health` | Sağlık kontrolü |
+
+### İlk açılış sırası
+
+1. **FM Portal'a girin** — ilk açılışta `values`'taki admin hesabı otomatik
+   oluşturulur; şifreyi arayüzden değiştirin.
+2. **Kural tanımlayın** — Portal → Rules (gerekirse Actions, Lists, Buckets).
+   Kayıt anında MongoDB change stream'i üzerinden Engine'e yansır; yeniden
+   başlatma gerekmez.
+3. **Event gönderin** — üretimde banka sistemleri, POC'de Event Simulator.
+
+### Event gönderimi ve kimlik doğrulama
+
+Engine'in `/events` endpoint'i **JWT (Bearer) zorunludur**. Token, Portal
+login servisinden alınır:
+
+```bash
+curl -sk -X POST https://fm.<clusterDomain>/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"<eposta>","password":"<sifre>"}'
+# yanıttaki "token" alanı kullanılır
+```
+
+Event Simulator ile test:
+
+1. Simulator arayüzünde yeni test oluşturun.
+2. **Target URL**: `http://fraudbuster-be.<namespace>.svc:5432/events`
+   (cluster içi servis adresi; trafik cluster dışına çıkmaz).
+3. **Bearer token** alanına yukarıdaki JWT'yi tek satır olarak yapıştırın.
+4. TPS ve süreyi belirleyip çalıştırın.
+
+### Log takibi
+
+Tüm uygulama pod'larının loglarını tek komutla izlemek için:
+
+```bash
+oc logs -f -n fraud-poc --all-containers --prefix \
+  -l 'app in (fraudbuster-be,fraudbuster-ui,dragonfly,eventsimulator-engine,eventsimulator-ui)' \
+  --max-log-requests=10
+```
+
+Tek bir bileşeni izlemek için: `oc logs -f deploy/fraudbuster-be -n fraud-poc`
+
+### Verinin aktığı yerler
+
+| Veri | Nereye yazılır | Nereden izlenir |
+|---|---|---|
+| Event (ham + skorlama metrikleri) | ClickHouse (`events` tablosu, async batch) | Portal → Events / Analytics / Dashboard |
+| Incident (kural tetiklenmesi) | MongoDB | Portal → Incidents |
+| Sayaçlar / aktör profilleri | Dragonfly (TTL'li) | Portal → Buckets (inceleme) |
+| Kural/aksiyon/liste/kullanıcı tanımları | MongoDB | Portal ilgili menüler |
+
+---
+
+## 5. Kapsam (OpenShift içi ve dışı)
+
+**OpenShift içinde (bu chart kurar):** FM Engine, FM Portal, Dragonfly,
+Event Simulator (engine + UI), servis/Route tanımları, uygulama secret'ları.
+
+**OpenShift dışında (bu chart kurmaz, yalnızca adres olarak referans verir):**
+
+| Bileşen | Referans verilen yer | Gereksinim |
+|---|---|---|
+| MongoDB | `externalDatabases.mongodb.uri` | Replica set `rs0` zorunlu (change stream'ler için), URI'de `replicaSet=rs0&directConnection=true` korunmalı; 27017/TCP cluster node'larına açık |
+| ClickHouse | `externalDatabases.clickhouse.*` | `events` şeması kurulmuş olmalı (kurulum script'leri ürün paketiyle verilir); 8123/TCP cluster node'larına açık |
+| İmaj registry'si | `imagePullSecret.*` ve `*.image` alanları | ghcr.io'ya çıkış ya da imajların banka registry'sine mirror'ı |
+
+---
+
+## 6. Values Referansı
+
+| Anahtar | Varsayılan | Açıklama |
+|---|---|---|
+| `clusterDomain` | örnek değer | Cluster'ın uygulama (Route) domain'i; host'lar `fm.`, `sim.`, `sim-engine.` önekleriyle türetilir |
+| `routes.enabled` | `true` | Route'ların oluşturulması |
+| `routes.fmHost` / `simHost` / `simEngineHost` | boş | Dolu verilirse türetme yerine bu host'lar kullanılır |
+| `imagePullSecret.create` | `true` | Pull secret'ı chart oluştursun mu (false ise aynı adla önceden oluşturulmalı) |
+| `imagePullSecret.name` | `ghcr-pull` | Secret adı |
+| `imagePullSecret.registry/username/token` | — | Registry kimlik bilgileri; **token values dosyasına yazılmamalı**, `--set` ile verilmelidir |
+| `auth.jwtSecret` | örnek değer | Engine ve Portal'ın paylaştığı JWT imza anahtarı — üretimde `openssl rand -base64 48` ile üretin |
+| `auth.adminEmail` / `adminPassword` | örnek değer | İlk açılışta oluşturulan admin hesabı |
+| `externalDatabases.mongodb.uri` | örnek değer | MongoDB bağlantı URI'si (rs0 + directConnection parametreleriyle) |
+| `externalDatabases.mongodb.database` | `fraudmanagement` | Veritabanı adı |
+| `externalDatabases.clickhouse.url` | örnek değer | ClickHouse HTTP adresi (`http://<ip>:8123`) |
+| `externalDatabases.clickhouse.database/user/password` | `fraudbuster` / `default` / örnek | ClickHouse erişim bilgileri |
+| `dragonfly.image` | `v1.39.0` (pinli) | Sürüm pinlidir; HEXPIRE/HTTL davranış uyumluluğu için değiştirmeden önce üreticiye danışın |
+| `dragonfly.maxmemory` / `proactorThreads` / `storage` | `4gb` / `2` / `10Gi` | Bellek sınırı, iş parçacığı sayısı, PVC boyutu — node kapasitesine göre ölçeklendirin |
+| `engine.image` | `fraudengine:main` | Engine imajı — üretimde sürüm/sha tag'ine pinleyin |
+| `engine.logLevel` / `rustLog` | `info` | Log seviyesi (yük testinde `warn` önerilir) |
+| `engine.bucketTtlSeconds` | `86400` | Sayaç TTL'i |
+| `engine.resources` / `ui.resources` / `simulator.*.resources` | POC değerleri | CPU/RAM istek ve limitleri — hedef TPS'e göre ölçeklendirin |
+| `ui.enablePocReset` | `true` | Portal'daki veri sıfırlama araçları — **üretimde `false` yapılmalıdır** |
+| `engine.dragonflyPlacement` | `separate` | Engine'in Dragonfly'a göre yerleşimi: `colocate` (aynı node) / `separate` (farklı node) / `none` (serbest) — bkz. Kurulum bölümündeki tablo |
+| `simulator.engine.fraudEnginePlacement` | `separate` | Yük üretecinin FM Engine'e göre yerleşimi (aynı üç değer); ölçüm sağlığı için `separate` önerilir |
+| `engine.tuning.*` | compose fallback'leri | **Tuning map**: her satır Engine container'ına environment variable olarak basılır; compose'daki tüm `FRAUDBUSTER_*` performans/bayrak env'leri burada (thread pool, pipeline/kuyruk limitleri, `DISABLE_*` bayrakları, batch boyutları...). Yeni env eklemek chart değişikliği gerektirmez. Bağlantı/kimlik env'leri burada tanımlanamaz — template reddeder |
+| `ui.tuning.*` | compose fallback'leri | UI tuning map'i: `INCIDENTS_FILTER_*` guardrail'leri ve `CLICKHOUSE_MAX_CONNECTIONS` |
+
+Tuning env'lerinin tam listesi ve ortam başına değerleri için `values.yaml`
+(taban) ve `values-customer.yaml` dosyalarına bakınız;
+anlam açıklamaları ürün paketindeki `env.template` içinde yorum satırı olarak
+mevcuttur.
+
+---
+
+## 7. Güvenlik ve Ağ
+
+### TLS
+
+- Tüm dış erişim OpenShift Route'ları üzerinden **edge TLS** ile şifrelidir;
+  HTTP istekleri HTTPS'e yönlendirilir (`insecureEdgeTerminationPolicy: Redirect`).
+- Varsayılan durumda router'ın wildcard sertifikası kullanılır. Bankaya özel
+  host adı kullanılacaksa Route'lara kurum sertifikası tanımlanmalıdır
+  (`spec.tls.certificate/key`); istenirse chart bu alanlarla genişletilebilir.
+- Cluster içi trafik (Portal→Engine, Engine→Dragonfly) pod ağında kalır ve
+  cluster dışına çıkmaz.
+- Not: Compose kurulumundaki nginx `client_max_body_size 10m` sınırının Route
+  karşılığı yoktur (OpenShift router gövde boyutu sınırı uygulamaz); istek
+  boyutu sınırlaması gerekiyorsa Route annotation'ları ile eklenebilir.
+
+### Secret Yönetimi
+
+- JWT anahtarı, ClickHouse şifresi ve admin bilgileri Kubernetes Secret'ında
+  tutulur; ortam değişkeni olarak pod'lara verilir.
+- Doldurulmuş `values-customer.yaml` secret içerdiğinden dosya erişimi
+  kısıtlanmalı; tercihen secret'lar `--set` ile ya da harici bir secret yönetimi (Vault,
+  Sealed Secrets vb.) ile sağlanmalıdır.
+- Registry token'ı yalnızca image çekme (`read:packages`) yetkisine sahip
+  olmalıdır.
+
+### Ağ gereksinimleri
+
+| Kaynak | Hedef | Port | Amaç |
+|---|---|---|---|
+| Analist / operatör | OpenShift Router | 443/TCP | Portal ve Simulator arayüzleri |
+| Cluster worker node'ları | MongoDB VM | 27017/TCP | Yapılandırma + incident + change stream |
+| Cluster worker node'ları | ClickHouse VM | 8123/TCP | Event arşivi ve raporlama |
+| Cluster (egress) | İmaj registry'si | 443/TCP | İmaj çekme (mirror kullanılıyorsa banka registry'si) |
+
+- MongoDB/ClickHouse portları yalnızca cluster node subnet'lerine açılmalı,
+  kullanıcı ağlarına kapatılmalıdır.
+- Pod ve Service CIDR'larının (cluster kurulumunda belirlenir) banka ağıyla
+  çakışmaması kurulum sahibinin sorumluluğundadır.
+- Namespace içi/dışı trafiği sınırlamak için NetworkPolicy eklenebilir
+  (bkz. Bölüm 7).
+
+### SCC uyumu
+
+Tüm iş yükleri OpenShift'in varsayılan `restricted-v2` SCC'si ile çalışır;
+özel yetki (privileged container, ek capability, seccomp istisnası)
+**gerektirmez**.
+
+---

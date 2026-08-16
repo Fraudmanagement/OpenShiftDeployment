@@ -1,0 +1,12 @@
+# Taban: yamls/02-external-db.yaml — cluster DIŞINDAKİ MongoDB ve ClickHouse adresleri
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: external-db
+  namespace: {{ .Release.Namespace }}
+data:
+  FRAUDBUSTER_MONGODB_URI: {{ .Values.externalDatabases.mongodb.uri | quote }}
+  MONGODB_DATABASE: {{ .Values.externalDatabases.mongodb.database | quote }}
+  FRAUDBUSTER_CLICKHOUSE_URL: {{ .Values.externalDatabases.clickhouse.url | quote }}
+  CLICKHOUSE_DATABASE: {{ .Values.externalDatabases.clickhouse.database | quote }}
+  CLICKHOUSE_USER: {{ .Values.externalDatabases.clickhouse.user | quote }}
