@@ -1,0 +1,22 @@
+KURULUM
+=======
+Örnek Server Public IP: 23.20.143.219
+
+Kurulum dosyalarını yükle
+-------------------------
+scp ./{setup-mongodb.sh,setup-clickhouse.sh,clickhouse-01-init.sql,clickhouse-02-views.sql} ubuntu@23.20.143.219:
+
+Makineye bağlan ve sırasıyla MongoDB ve ClickHouse kurulum scriptlerini çalıştır
+--------------------------------------------------------------------------------
+sudo bash /home/ubuntu/setup-mongodb.sh
+sudo bash /home/ubuntu/setup-clickhouse.sh 'Test123!'
+
+Sunucu'da Dışarıya Erişim Verilmesi Gereken Port'lar
+----------------------------------------------------
+MongoDB:    27017/TCP
+ClickHouse: 8123/TCP, 9000/TCP, 9009/TCP
+
+Client ile test et
+------------------
+mongosh "mongodb://23.20.143.219:27017/fraudmanagement?replicaSet=rs0&directConnection=true"
+clickhouse client --host 23.20.143.219 --user default --password 'Test123!'

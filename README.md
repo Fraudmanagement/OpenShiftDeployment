@@ -9,10 +9,11 @@ işletmeye dair başvuru kaynağıdır.
 1. [Sistem Genel Bakış](#1-sistem-genel-bakış)
 2. [Ortam ve Boyutlandırma](#2-ortam-ve-boyutlandırma)
 3. [Kurulum ve Yaşam Döngüsü](#3-kurulum-ve-yaşam-döngüsü)
-4. [Kullanım](#4-kullanım)
-5. [Kapsam (OpenShift içi ve dışı)](#5-kapsam-openshift-içi-ve-dışı)
-6. [Values Referansı](#6-values-referansı)
-7. [Güvenlik ve Ağ](#7-güvenlik-ve-ağ)
+4. [Veritabanı Kurulumları](#4-veritabanı-kurulumları-mongodb--clickhouse)
+5. [Kullanım](#5-kullanım)
+6. [Kapsam (OpenShift içi ve dışı)](#6-kapsam-openshift-içi-ve-dışı)
+7. [Values Referansı](#7-values-referansı)
+8. [Güvenlik ve Ağ](#8-güvenlik-ve-ağ)
 
 ---
 
@@ -84,7 +85,7 @@ kullanılmamaktadır — Engine, shard sayısını bağlantı sırasında Dragon
 
 - OpenShift 4.x cluster'ı ve proje oluşturma yetkisi (`oc` girişi yapılmış olmalı)
 - MongoDB (replica set `rs0`) ve ClickHouse'un banka ağında kurulu ve
-  cluster'dan erişilebilir olması (bkz. Bölüm 4)
+  cluster'dan erişilebilir olması (kurulum için bkz. Bölüm 4)
 - `ghcr.io/fraudmanagement` imajları için erişim token'ı (ya da imajların
   banka registry'sine mirror edilmiş olması)
 
@@ -230,7 +231,64 @@ helm template trueguardvision ./charts/trueguardvision
 
 ---
 
-## 4. Kullanım
+## 4. Veritabanı Kurulumları (MongoDB + ClickHouse)
+
+MongoDB ve ClickHouse, OpenShift dışındaki VM'lere `scripts/` klasöründeki
+kurulum script'leriyle kurulur (Ubuntu/Debian ve RHEL ailesi desteklenir).
+
+### Kurulum dosyalarının sunucuya yüklenmesi
+
+`scp`, dosyaları SSH üzerinden uzak sunucuya kopyalar. Repo kökünden
+(`<VM_IP>` yerine sunucunun adresini yazın):
+
+```bash
+scp scripts/setup-mongodb.sh scripts/setup-clickhouse.sh \
+    scripts/clickhouse-01-init.sql scripts/clickhouse-02-views.sql \
+    ubuntu@<VM_IP>:
+```
+
+### Kurulum
+
+Sunucuya bağlanıp script'leri sırasıyla çalıştırın:
+
+```bash
+ssh ubuntu@<VM_IP>
+sudo bash setup-mongodb.sh
+sudo bash setup-clickhouse.sh '<CLICKHOUSE_SIFRESI>'
+```
+
+- `setup-mongodb.sh` — MongoDB 7'yi tek node'lu `rs0` replica set olarak
+  kurar (change stream'ler için zorunlu) ve `PRIMARY` durumunu doğrular.
+- `setup-clickhouse.sh` — ClickHouse'u kurar, `default` kullanıcısına
+  argüman olarak verilen şifreyi atar, şemayı ve analitik view'ları yükler.
+  Bu şifre, kurulumda kullanılan `externalDatabases.clickhouse.password`
+  değeriyle aynı olmalıdır.
+
+### Açılması gereken portlar
+
+| Bileşen | Port | Protokol | Amaç |
+|---|---|---|---|
+| MongoDB | 27017 | TCP | Engine + Portal bağlantısı, change stream'ler |
+| ClickHouse | 8123 | TCP | HTTP arayüzü — Engine event yazımı, Portal raporlama |
+| ClickHouse | 9000 | TCP | Native protokol — `clickhouse client` |
+| ClickHouse | 9009 | TCP | Interserver (yalnızca replikalı kurulumda gerekir) |
+
+Portlar yalnızca OpenShift cluster subnet'lerine (ve yönetim erişimi için
+gerekli adreslere) açılmalı, kullanıcı ağlarına kapatılmalıdır.
+
+### Client ile doğrulama
+
+```bash
+mongosh "mongodb://<VM_IP>:27017/fraudmanagement?replicaSet=rs0&directConnection=true"
+clickhouse client --host <VM_IP> --user default --password '<CLICKHOUSE_SIFRESI>'
+```
+
+Gerçek değerlerle yazılmış örnek komutlar için ayrıca
+[`scripts/kurulum.txt`](scripts/kurulum.txt) dosyasına bakabilirsiniz.
+
+---
+
+## 5. Kullanım
 
 ### Erişim adresleri
 
@@ -294,7 +352,7 @@ Tek bir bileşeni izlemek için: `oc logs -f deploy/fraudbuster-be -n fraud-poc`
 
 ---
 
-## 5. Kapsam (OpenShift içi ve dışı)
+## 6. Kapsam (OpenShift içi ve dışı)
 
 **OpenShift içinde (bu chart kurar):** FM Engine, FM Portal, Dragonfly,
 Event Simulator (engine + UI), servis/Route tanımları, uygulama secret'ları.
@@ -309,7 +367,7 @@ Event Simulator (engine + UI), servis/Route tanımları, uygulama secret'ları.
 
 ---
 
-## 6. Values Referansı
+## 7. Values Referansı
 
 | Anahtar | Varsayılan | Açıklama |
 |---|---|---|
@@ -344,7 +402,7 @@ mevcuttur.
 
 ---
 
-## 7. Güvenlik ve Ağ
+## 8. Güvenlik ve Ağ
 
 ### TLS
 
