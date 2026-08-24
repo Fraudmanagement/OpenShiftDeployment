@@ -31,7 +31,7 @@ externalDatabases:
     password: "ChangeMeClickHouse!"
 
 dragonfly:
-  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0
+  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.40.1
   pullPolicy: "Always"
   maxmemory: "4gb"
   proactorThreads: 4
