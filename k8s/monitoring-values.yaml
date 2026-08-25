@@ -30,15 +30,17 @@ prometheus-node-exporter:
       # instance label'ı default'ta IP:port'tur (node-exporter hedefleri IP ile
       # kaydolur, hostname çözülmez). Relabeling ile insan-okur hale getiriyoruz.
       relabelings:
-        # Varyant 1 — sade isim: instance = "worker-01"
-        # (yalnız node adı; dropdown kısa ve temiz kalır)
-        #- sourceLabels: [__meta_kubernetes_endpoint_node_name]
-        #  targetLabel: instance
-        #  action: replace
-        # Varyant 2 (AKTİF) — isim + IP: instance = "worker-01 (172.31.28.148)"
-        # İki source label ";" ile birleşir, regex isim + IP'yi yakalar (port atılır).
-        - sourceLabels: [__meta_kubernetes_endpoint_node_name, __address__]
-          regex: "(.+);(.+):.+"
+        # Varyant 1 (AKTİF) — sade isim: instance = "worker-01"
+        # Parantezsiz/noktasız etiket: Grafana multi-select'in ürettiği regex'te
+        # özel karakter sorunu çıkmaz. (isim+IP varyantı bu yüzden terk edildi.)
+        - sourceLabels: [__meta_kubernetes_endpoint_node_name]
           targetLabel: instance
-          replacement: "$1 ($2)"
           action: replace
+        # Varyant 2 (TERK EDİLDİ) — isim + IP: instance = "worker-01 (172.31.28.148)"
+        # "( ) ." karakterleri regex'in özel karakterleri; Grafana multi-value
+        # interpolasyonunda escape edilmeyince panel sorguları eşleşmiyor (No data).
+        #- sourceLabels: [__meta_kubernetes_endpoint_node_name, __address__]
+        #  regex: "(.+);(.+):.+"
+        #  targetLabel: instance
+        #  replacement: "$1 ($2)"
+        #  action: replace

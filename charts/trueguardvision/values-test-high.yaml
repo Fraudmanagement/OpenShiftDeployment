@@ -89,7 +89,7 @@ engine:
   logLevel: warn
   rustLog: warn
   logFormat: "json"
-  rustBacktrace: "1"
+  rustBacktrace: "0"
   serverPort: "5432"        # Service/Route/probe portlarıyla birlikte düşünülmeli
   pluginDir: "/app/plugins"
   redisUri: "redis://dragonfly:6379?pool_size=300&min_idle=50&connection_timeout=3&response_timeout=5"
