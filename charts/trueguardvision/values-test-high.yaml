@@ -62,7 +62,7 @@ externalDatabases:
     password: "TestHighCh2026!"
 
 dragonfly:
-  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0
+  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.40.1
   pullPolicy: "Always"
   # c6i.2xlarge (8 vCPU/16 GB) dedike node: thread = CPU kuralı; 1 vCPU
   # kubelet/flannel'a bırakıldı. Engine shard sayısını canlıdan öğrenir.
