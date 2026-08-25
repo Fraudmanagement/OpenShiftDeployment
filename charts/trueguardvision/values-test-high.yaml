@@ -183,14 +183,18 @@ simulator:
       - key: dedicated
         value: simulator
         effect: NoSchedule
-    # c6i.xlarge (4 vCPU/8 GB) dedike node
+    # worker-05 / c6i.2xlarge (8 vCPU/16 GB) dedike node.
+    # limit 7: 1 vCPU kubelet/containerd/flannel/kube-proxy/node-exporter'a
+    # bırakıldı — 8 verilirse pod sistem daemon'larını aç bırakıp node'u
+    # NotReady'ye düşürebilir. (Önceki 4 vCPU'luk node'da limit 3'tü ve
+    # 40k TPS'te %11 CPU throttling ölçülmüştü.)
     resources:
       requests:
-        cpu: "2"
-        memory: 2Gi
-      limits:
-        cpu: "3"
+        cpu: "6"
         memory: 4Gi
+      limits:
+        cpu: "7"
+        memory: 8Gi
   ui:
     image: ghcr.io/fraudmanagement/eventsimulator-ui:latest
     pullPolicy: "Always"
