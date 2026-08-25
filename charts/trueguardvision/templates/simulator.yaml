@@ -129,10 +129,12 @@ spec:
             # Tarayıcının engine'e gideceği DIŞ adres (Route).
             # Yeni image runtime'da ENGINE_PUBLIC_URL okur (window._ENGINE_URL_);
             # NEXT_PUBLIC_ENGINE_URL eski build'lerle uyumluluk için duruyor.
+            # Route'suz ortamlar (vanilla k8s / NodePort) simulator.ui.enginePublicUrl
+            # ile tam URL verir; boşsa eski davranış (https://<simEngineHost>) korunur.
             - name: ENGINE_PUBLIC_URL
-              value: "https://{{ include "trueguardvision.simEngineHost" . }}"
+              value: {{ .Values.simulator.ui.enginePublicUrl | default (printf "https://%s" (include "trueguardvision.simEngineHost" .)) | quote }}
             - name: NEXT_PUBLIC_ENGINE_URL
-              value: "https://{{ include "trueguardvision.simEngineHost" . }}"
+              value: {{ .Values.simulator.ui.enginePublicUrl | default (printf "https://%s" (include "trueguardvision.simEngineHost" .)) | quote }}
           resources:
 {{ toYaml .Values.simulator.ui.resources | indent 12 }}
           readinessProbe:

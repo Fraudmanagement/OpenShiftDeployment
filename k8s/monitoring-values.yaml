@@ -1,0 +1,44 @@
+# kube-prometheus-stack values — test-high k8s lab (CP: ~/prometheus/monitoring-values.yaml)
+# Kurulum:  helm upgrade monitoring prometheus-community/kube-prometheus-stack \
+#             -n monitoring -f monitoring-values.yaml
+# Beyin (prometheus/grafana/alertmanager/operator/kube-state-metrics) worker-04'te
+# (role=ui-monitoring label'ı); node-exporter DaemonSet her node'da (nodeSelector YOK).
+prometheus:
+  prometheusSpec:
+    nodeSelector:
+      role: ui-monitoring
+grafana:
+  service:
+    type: NodePort
+    nodePort: 30900
+  nodeSelector:
+    role: ui-monitoring
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector:
+      role: ui-monitoring
+prometheusOperator:
+  nodeSelector:
+    role: ui-monitoring
+kube-state-metrics:
+  nodeSelector:
+    role: ui-monitoring
+
+prometheus-node-exporter:
+  prometheus:
+    monitor:
+      # instance label'ı default'ta IP:port'tur (node-exporter hedefleri IP ile
+      # kaydolur, hostname çözülmez). Relabeling ile insan-okur hale getiriyoruz.
+      relabelings:
+        # Varyant 1 — sade isim: instance = "worker-01"
+        # (yalnız node adı; dropdown kısa ve temiz kalır)
+        #- sourceLabels: [__meta_kubernetes_endpoint_node_name]
+        #  targetLabel: instance
+        #  action: replace
+        # Varyant 2 (AKTİF) — isim + IP: instance = "worker-01 (172.31.28.148)"
+        # İki source label ";" ile birleşir, regex isim + IP'yi yakalar (port atılır).
+        - sourceLabels: [__meta_kubernetes_endpoint_node_name, __address__]
+          regex: "(.+);(.+):.+"
+          targetLabel: instance
+          replacement: "$1 ($2)"
+          action: replace

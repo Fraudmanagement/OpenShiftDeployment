@@ -1,0 +1,219 @@
+# =============================================================================
+# TEST-HIGH profili — vanilla Kubernetes (kubeadm, EC2), maksimum TPS denemesi
+# OpenShift'e ÖZGÜ hiçbir obje üretmez: routes.enabled=false (Route CRD yok).
+# Dış erişim chart dışından verilir: ../../k8s/nodeport-services.yaml
+#
+# Topoloji (her yük kendi node'unda; label+taint node'lara elle basılır):
+#   control-plane  t3.medium    — k8s CP + Headlamp
+#   worker-df      c6i.2xlarge  — dragonfly     (role=dragonfly, dedicated=dragonfly:NoSchedule)
+#   worker-engine  c6i.2xlarge  — fraud engine  (role=engine,    dedicated=engine:NoSchedule)
+#   worker-sim     c6i.xlarge   — sim engine    (role=simulator, dedicated=simulator:NoSchedule)
+#   worker-ui      m6i.large    — fraudbuster-ui + simulator-ui (taint'siz tek node → UI'lar buraya düşer)
+#   clickhouse     m6i.2xlarge  — cluster DIŞI EC2
+#   mongodb        m6i.xlarge   — cluster DIŞI EC2
+#
+# Node hazırlığı (bir kere, CP'den):
+#   kubectl label node worker-df     role=dragonfly
+#   kubectl label node worker-engine role=engine
+#   kubectl label node worker-sim    role=simulator
+#   kubectl taint node worker-df     dedicated=dragonfly:NoSchedule
+#   kubectl taint node worker-engine dedicated=engine:NoSchedule
+#   kubectl taint node worker-sim    dedicated=simulator:NoSchedule
+#
+# NOT: dragonfly StatefulSet'i 10Gi PVC ister; kubeadm'de default StorageClass
+# yok → önce local-path-provisioner kur (yoksa pod Pending kalır):
+#   kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
+#   kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+#
+# Kullanım (repo kökünden):
+#   helm install trueguardvision ./charts/trueguardvision -n fraud-poc \
+#     --create-namespace -f charts/trueguardvision/values-test-high.yaml \
+#     --set imagePullSecret.token=ghp_XXX
+#   kubectl apply -n fraud-poc -f k8s/nodeport-services.yaml
+# =============================================================================
+
+# routes kapalı → host'lar Route üretiminde kullanılmıyor; yalnız simulator-ui'ın
+# ENGINE_PUBLIC_URL env'ine giriyor (aşağıdaki routes.simEngineHost notuna bak).
+clusterDomain: "k8s.local"
+
+imagePullSecret:
+  create: true
+  name: ghcr-pull
+  registry: ghcr.io
+  username: fraudmanagement
+  token: ""             # GitHub PAT (read:packages) — dosyaya yazmayın, --set ile verin
+
+auth:
+  jwtSecret: "test-high-jwt-secret-degistir-openssl-rand-base64-48"
+  adminEmail: "admin@fm.com"
+  adminPassword: "TestHighAdmin2026!"
+
+externalDatabases:
+  mongodb:
+    # Change stream'ler için replicaSet=rs0 + directConnection=true ŞART
+    # 172.31.20.193 → mongodb EC2'sinin PRIVATE IP'si
+    uri: "mongodb://172.31.20.193:27017/fraudmanagement?replicaSet=rs0&directConnection=true&maxPoolSize=50&minPoolSize=10&maxIdleTimeMS=60000&waitQueueTimeoutMS=5000&serverSelectionTimeoutMS=5000"
+    database: "fraudmanagement"
+  clickhouse:
+    # 172.31.84.214 → clickhouse EC2'sinin PRIVATE IP'si
+    url: "http://172.31.84.214:8123"
+    database: "fraudbuster"
+    user: "default"
+    password: "TestHighCh2026!"
+
+dragonfly:
+  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0
+  pullPolicy: "Always"
+  # c6i.2xlarge (8 vCPU/16 GB) dedike node: thread = CPU kuralı; 1 vCPU
+  # kubelet/flannel'a bırakıldı. Engine shard sayısını canlıdan öğrenir.
+  maxmemory: "10gb"
+  proactorThreads: 7
+  storage: 10Gi
+  nodeSelector:
+    role: dragonfly
+  tolerations:
+    - key: dedicated
+      value: dragonfly
+      effect: NoSchedule
+  resources:
+    requests:
+      cpu: "6"
+      memory: 8Gi
+    limits:
+      cpu: "7"
+      memory: 12Gi
+
+engine:
+  image: ghcr.io/fraudmanagement/fraudengine:main
+  pullPolicy: "Always"
+  logLevel: warn
+  rustLog: warn
+  logFormat: "json"
+  rustBacktrace: "1"
+  serverPort: "5432"        # Service/Route/probe portlarıyla birlikte düşünülmeli
+  pluginDir: "/app/plugins"
+  redisUri: "redis://dragonfly:6379?pool_size=300&min_idle=50&connection_timeout=3&response_timeout=5"
+  bucketTtlSeconds: "86400"
+  enableChangeStreams: "true"
+  updateStrategy: "Recreate"
+  # Yerleşim affinity ile değil nodeSelector+taint ile: placement none ŞART,
+  # colocate/separate affinity'leri nodeSelector'la çelişip Pending üretir.
+  dragonflyPlacement: "none"
+  nodeSelector:
+    role: engine
+  tolerations:
+    - key: dedicated
+      value: engine
+      effect: NoSchedule
+  # c6i.2xlarge (8 vCPU/16 GB) dedike node
+  resources:
+    requests:
+      cpu: "6"
+      memory: 6Gi
+    limits:
+      cpu: "7"
+      memory: 12Gi
+  tuning:
+    FRAUDBUSTER_THREAD_POOL_SIZE: "32"
+    FRAUDBUSTER_CLICKHOUSE_BATCH_SIZE: "5000"
+    FRAUDBUSTER_CLICKHOUSE_FLUSH_INTERVAL_SECS: "2"
+    FRAUDBUSTER_DISABLE_PHASE_C_BUCKET_WRITES: "false"
+    FRAUDBUSTER_DEFER_PHASE_C_BUCKET_WRITES: "true"
+    FRAUDBUSTER_MAX_CONCURRENT_DEFERRED_BUCKET_WRITES: "2048"
+    FRAUDBUSTER_REUSE_RULE_PHASE_BUCKET_READS: "true"
+    FRAUDBUSTER_ENABLE_FEATURE_GRAPH_POST_TASKS: "false"
+    FRAUDBUSTER_MAX_CONCURRENT_POST_TASKS: "1024"
+    FRAUDBUSTER_BACKGROUND_WORKER_THREADS: "4"
+    FRAUDBUSTER_MAX_CONCURRENT_DRAGONFLY_WRITE_PIPELINES: "16"
+    FRAUDBUSTER_MAX_CONCURRENT_DRAGONFLY_READ_PIPELINES: "16"
+    FRAUDBUSTER_MAX_CONCURRENT_BACKGROUND_DRAGONFLY_READ_PIPELINES: "4"
+    FRAUDBUSTER_DRAGONFLY_POOL_SIZE: "32"
+    FRAUDBUSTER_DISABLE_INCIDENT_CREATION: "false"
+    FRAUDBUSTER_DISABLE_CLICKHOUSE_EVENT_WRITES: "false"
+    FRAUDBUSTER_DISABLE_ACTOR_HASH_TTL: "true"
+    FRAUDBUSTER_SET_REFRESH_GRANULARITY_PERCENT: "10"
+    FRAUDBUSTER_ENABLE_PROFILING_ENDPOINT: "false"
+    FRAUDBUSTER_MAX_CONCURRENT_BUCKET_TASKS: "4096"
+    FRAUDBUSTER_BUCKET_QUEUE_CAPACITY: "100000"
+    FRAUDBUSTER_BUCKET_BACKLOG_WARN_THRESHOLD: "5000"
+    FRAUDBUSTER_MAX_CONCURRENT_INCIDENT_TASKS: "64"
+    FRAUDBUSTER_INCIDENT_QUEUE_CAPACITY: "50000"
+    FRAUDBUSTER_INCIDENT_BATCH_SIZE: "500"
+    FRAUDBUSTER_INCIDENT_FLUSH_INTERVAL_MS: "250"
+
+ui:
+  image: ghcr.io/fraudmanagement/fraudbuster:main
+  pullPolicy: "Always"
+  nodeEnv: "production"
+  nextTelemetryDisabled: "1"
+  demoMode: "false"
+  enablePocReset: "true"    # gerçek production'da false
+  jwtExpiresIn: "7d"
+  mongooseAutoIndex: "false"
+  backendUrl: "http://fraudbuster-be:5432"
+  # UI template'lerinde nodeSelector alanı yok; df/engine/sim node'ları
+  # taint'li olduğundan UI'lar taint'siz tek worker'a (worker-ui) düşer.
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+    limits:
+      cpu: "1500m"        # m6i.large 2 vCPU: iki UI limiti toplamı node'u aşmasın
+      memory: 2Gi
+  tuning:
+    INCIDENTS_GROUPS_LEGACY_AGGREGATION: "false"
+    INCIDENTS_FILTER_GLOBAL_MAX_DAYS: "31"
+    INCIDENTS_FILTER_PROJECT_MAX_DAYS: "90"
+    INCIDENTS_FILTER_MAX_TIME_MS: "30000"
+    INCIDENTS_FILTERED_SLOW_MS: "1000"
+    INCIDENTS_SUMMARY_SLOW_MS: "300"
+    CLICKHOUSE_MAX_CONNECTIONS: "20"
+
+simulator:
+  engine:
+    image: ghcr.io/fraudmanagement/eventsimulator-engine:latest
+    pullPolicy: "Always"
+    port: "7070"
+    db: "/data/simulator.db"
+    # nodeSelector+taint yerleşimi: none ŞART (engine.dragonflyPlacement notu)
+    fraudEnginePlacement: "none"
+    nodeSelector:
+      role: simulator
+    tolerations:
+      - key: dedicated
+        value: simulator
+        effect: NoSchedule
+    # c6i.xlarge (4 vCPU/8 GB) dedike node
+    resources:
+      requests:
+        cpu: "2"
+        memory: 2Gi
+      limits:
+        cpu: "3"
+        memory: 4Gi
+  ui:
+    image: ghcr.io/fraudmanagement/eventsimulator-ui:latest
+    pullPolicy: "Always"
+    nodeEnv: "production"
+    # Tarayıcının sim-engine'e gideceği DIŞ adres (NodePort; Route yok).
+    # IP = herhangi bir node'un public IP'si; stop/start'ta değişirse güncelle.
+    enginePublicUrl: "http://54.198.253.196:30707"
+    resources:
+      requests:
+        cpu: "250m"
+        memory: 512Mi
+      limits:
+        cpu: "500m"       # m6i.large 2 vCPU: fraudbuster-ui ile toplam 2'yi aşmasın
+        memory: 1Gi
+
+routes:
+  # Vanilla k8s: Route CRD yok → chart Route üretmez. Dış erişim NodePort ile:
+  # kubectl apply -n <ns> -f k8s/nodeport-services.yaml
+  enabled: false
+  fmHost: ""
+  simHost: ""
+  # BİLİNEN SINIR: simulator-ui, ENGINE_PUBLIC_URL'i template'te
+  # "https://<simEngineHost>" olarak kurar (template'e dokunulmadı).
+  # NodePort http olduğundan tarayıcı→sim-engine çağrısı bu adresle çalışmaz;
+  # sim-engine NodePort'una doğrudan erişim gerekiyorsa template düzeltmesi şart.
+  simEngineHost: ""
