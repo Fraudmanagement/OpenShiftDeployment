@@ -1,4 +1,4 @@
-# =============================================================================
+i# =============================================================================
 # CUSTOMER profili — üretim/POC boyutlandırması
 # Kaynak: docs-ext/docker_setup_files/docker-customer/env.template
 # Hedef kapasiteler: FM_BE 32c/64G · FM_UI 8c/8G · Dragonfly 32c/64G
@@ -37,7 +37,7 @@ externalDatabases:
     password: "ChangeMeClickHouse!"
 
 dragonfly:
-  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0
+  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.40.1
   pullPolicy: "Always"
   maxmemory: "56gb"
   proactorThreads: 32
