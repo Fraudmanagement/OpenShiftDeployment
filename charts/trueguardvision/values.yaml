@@ -154,6 +154,13 @@ simulator:
         cpu: "1"
         memory: 1Gi
 
+# Küresel yerleşim: spreadAll=true iken 5 pod'un HER BİRİ ayrı node'a yerleşir
+# (zorunlu podAntiAffinity). Açıkken çiftli placement alanları (engine.dragonflyPlacement,
+# simulator.engine.fraudEnginePlacement) EZİLİR — colocate dahil, uygulanmaz.
+# En az 5 uygun worker node gerektirir.
+placement:
+  spreadAll: false
+
 routes:
   enabled: true
   fmHost: ""

@@ -102,12 +102,17 @@ yerleşimini yönetir; ikisi de aynı üç değeri alır
 
 | Değer | Davranış | Ne zaman |
 |---|---|---|
-| `colocate` | İlgili pod'lar AYNI node'a yerleşir (podAffinity, zorunlu) | Node kapasitesi iki iş yükünün limit toplamına bol geliyorsa (örn. adanmış ≥70 CPU worker) — node içi trafik, ağ gecikmesini sıfırlar |
-| `separate` | İlgili pod'lar FARKLI node'lara yerleşir (podAntiAffinity, zorunlu) | Dar node'larda CPU çekişmesini önlemek için; yük üreteci için her durumda önerilir (ölçüm sağlığı) |
+| `colocate` | İlgili pod'lar AYNI node'a yerleşir (podAffinity, zorunlu) | **Yalnız test/karşılaştırma amaçlıdır; üretim kurulumlarında kullanılmamalıdır** |
+| `separate` | İlgili pod'lar FARKLI node'lara yerleşir (podAntiAffinity, zorunlu) | Üretim ve POC için önerilen değer; yük üreteci için her durumda (ölçüm sağlığı) |
 | `none` | Kural yok; scheduler serbest | Yerleşim önemli değilse |
 
 Varsayılan (`values-customer.yaml`): `dragonflyPlacement: separate`,
 `fraudEnginePlacement: separate`.
+
+**Tam dağıtım (`placement.spreadAll`):** `true` yapıldığında beş uygulama
+pod'unun her biri farklı bir node'a yerleşir (zorunlu podAntiAffinity).
+Bu kip açıkken yukarıdaki çiftli alanlar — `colocate` dahil — **devre dışı
+kalır (ezilir)**. En az 5 uygun worker node gerektirir. Varsayılan: `false`.
 
 Ölçüm notu: Bu chart'ın doğrulandığı test ortamında (2× 8 vCPU worker,
 10.000 TPS, 1M müşteri) en iyi sonuç **her iki alanın `separate`** olduğu
@@ -390,7 +395,8 @@ Event Simulator (engine + UI), servis/Route tanımları, uygulama secret'ları.
 | `engine.bucketTtlSeconds` | `86400` | Sayaç TTL'i |
 | `engine.resources` / `ui.resources` / `simulator.*.resources` | POC değerleri | CPU/RAM istek ve limitleri — hedef TPS'e göre ölçeklendirin |
 | `ui.enablePocReset` | `true` | Portal'daki veri sıfırlama araçları — **üretimde `false` yapılmalıdır** |
-| `engine.dragonflyPlacement` | `separate` | Engine'in Dragonfly'a göre yerleşimi: `colocate` (aynı node) / `separate` (farklı node) / `none` (serbest) — bkz. Kurulum bölümündeki tablo |
+| `engine.dragonflyPlacement` | `separate` | Engine'in Dragonfly'a göre yerleşimi: `colocate` (aynı node, yalnız test amaçlı) / `separate` (farklı node) / `none` (serbest) — bkz. Kurulum bölümündeki tablo |
+| `placement.spreadAll` | `false` | `true`: beş pod'un her biri ayrı node'a yerleşir; çiftli placement alanlarını (colocate dahil) ezer. En az 5 worker gerektirir |
 | `simulator.engine.fraudEnginePlacement` | `separate` | Yük üretecinin FM Engine'e göre yerleşimi (aynı üç değer); ölçüm sağlığı için `separate` önerilir |
 | `engine.tuning.*` | compose fallback'leri | **Tuning map**: her satır Engine container'ına environment variable olarak basılır; compose'daki tüm `FRAUDBUSTER_*` performans/bayrak env'leri burada (thread pool, pipeline/kuyruk limitleri, `DISABLE_*` bayrakları, batch boyutları...). Yeni env eklemek chart değişikliği gerektirmez. Bağlantı/kimlik env'leri burada tanımlanamaz — template reddeder |
 | `ui.tuning.*` | compose fallback'leri | UI tuning map'i: `INCIDENTS_FILTER_*` guardrail'leri ve `CLICKHOUSE_MAX_CONNECTIONS` |

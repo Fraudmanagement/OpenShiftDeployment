@@ -17,7 +17,11 @@ spec:
     metadata:
       labels:
         app: dragonfly
+        tgv-spread: "true"
     spec:
+      {{- if include "trueguardvision.spreadAll" . }}
+      {{- include "trueguardvision.spreadAffinity" . | nindent 6 }}
+      {{- end }}
       {{- with .Values.dragonfly.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

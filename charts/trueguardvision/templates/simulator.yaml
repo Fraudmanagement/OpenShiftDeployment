@@ -17,12 +17,16 @@ spec:
     metadata:
       labels:
         app: eventsimulator-engine
+        tgv-spread: "true"
     spec:
       {{- $fp := .Values.simulator.engine.fraudEnginePlacement }}
       {{- if not (has $fp (list "colocate" "separate" "none")) }}
       {{- fail (printf "simulator.engine.fraudEnginePlacement gecersiz: %q (colocate|separate|none)" $fp) }}
       {{- end }}
-      {{- if eq $fp "colocate" }}
+      {{- if include "trueguardvision.spreadAll" . }}
+      # placement.spreadAll: her pod ayrı node — fraudEnginePlacement (colocate dahil) EZİLİR
+      {{- include "trueguardvision.spreadAffinity" . | nindent 6 }}
+      {{- else if eq $fp "colocate" }}
       # Yük üreteci, FM Engine ile AYNI node'a yerleşmek zorunda
       affinity:
         podAffinity:
@@ -113,7 +117,11 @@ spec:
     metadata:
       labels:
         app: eventsimulator-ui
+        tgv-spread: "true"
     spec:
+      {{- if include "trueguardvision.spreadAll" . }}
+      {{- include "trueguardvision.spreadAffinity" . | nindent 6 }}
+      {{- end }}
       imagePullSecrets:
         - name: {{ .Values.imagePullSecret.name }}
       containers:

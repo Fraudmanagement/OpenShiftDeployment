@@ -1,4 +1,4 @@
-i# =============================================================================
+# =============================================================================
 # CUSTOMER profili — üretim/POC boyutlandırması
 # Kaynak: docs-ext/docker_setup_files/docker-customer/env.template
 # Hedef kapasiteler: FM_BE 32c/64G · FM_UI 8c/8G · Dragonfly 32c/64G
@@ -165,6 +165,13 @@ simulator:
       limits:
         cpu: "2"
         memory: 4Gi
+
+# Küresel yerleşim: spreadAll=true iken 5 pod'un HER BİRİ ayrı node'a yerleşir
+# (zorunlu podAntiAffinity). Açıkken çiftli placement alanları (engine.dragonflyPlacement,
+# simulator.engine.fraudEnginePlacement) EZİLİR — colocate dahil, uygulanmaz.
+# En az 5 uygun worker node gerektirir.
+placement:
+  spreadAll: false
 
 routes:
   enabled: true

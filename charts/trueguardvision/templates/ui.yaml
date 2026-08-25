@@ -15,7 +15,11 @@ spec:
     metadata:
       labels:
         app: fraudbuster-ui
+        tgv-spread: "true"
     spec:
+      {{- if include "trueguardvision.spreadAll" . }}
+      {{- include "trueguardvision.spreadAffinity" . | nindent 6 }}
+      {{- end }}
       imagePullSecrets:
         - name: {{ .Values.imagePullSecret.name }}
       containers:
