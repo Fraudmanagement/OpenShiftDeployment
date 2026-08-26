@@ -303,6 +303,7 @@ Kurulum sonrası (varsayılan host şablonu `<ad>.<clusterDomain>`):
 |---|---|---|
 | FM Portal | `https://fm.<clusterDomain>` | İlk giriş: `auth.adminEmail` / `auth.adminPassword` |
 | Event Simulator | `https://sim.<clusterDomain>` | Test arayüzü |
+| Event Simulator Taget URL | `https://sim.<clusterDomain>/events` | Similator Target URL |
 | Simulator Engine API | `https://sim-engine.<clusterDomain>/api/health` | Sağlık kontrolü |
 
 ### İlk açılış sırası
