@@ -4,9 +4,9 @@
 -- NOT auto-created by the Rust engine (fraudbuster_be only creates the base
 -- `events` / `model_features` tables on startup — see
 -- src/persistence/clickhouse.rs::initialize_schema_static). These views are
--- optional: the UI's timeseries endpoint falls back to querying the raw
--- `events` table if `events_hourly_stats` is missing, so the dashboard still
--- works without this script — just slower on large (7d/30d) windows.
+-- optional: analytics endpoints fall back to querying the raw `events` table
+-- if these views are missing, so the dashboard still works without this
+-- script — just slower on large (7d/30d) windows and after high-TPS ingest.
 --
 -- Run once, after clickhouse-init.sql (setup-clickhouse.sh does this
 -- automatically). Safe to re-run: every view uses IF NOT EXISTS.
@@ -147,3 +147,56 @@ AS SELECT
     uniq(actor_id)                   AS unique_actors
 FROM fraudbuster.events
 GROUP BY event_name, window_start;
+
+-- ============================================
+-- 7. DASHBOARD STATS (HOURLY)
+-- ============================================
+-- AggregatingMergeTree so avg / min / max / uniq merge correctly — unlike
+-- SummingMergeTree, which can only sum counts. Used by the performance page
+-- summary KPIs and processing-time chart for 24h / 7d / 30d windows.
+-- ORDER BY starts with hour_start so time-range filters prune parts.
+CREATE MATERIALIZED VIEW IF NOT EXISTS fraudbuster.dashboard_stats_hourly
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour_start)
+ORDER BY (hour_start, event_name)
+POPULATE
+AS SELECT
+    toStartOfHour(timestamp)              AS hour_start,
+    event_name,
+    countState()                          AS event_count,
+    sumState(toUInt64(rules_triggered_count > 0)) AS fraud_count,
+    sumState(toUInt64(rules_triggered_count)) AS rules_triggered,
+    sumState(toFloat64(amount))           AS total_amount,
+    avgState(toFloat64(rule_execution_time_ms)) AS avg_rule_time,
+    minState(rule_execution_time_ms)      AS min_rule_time,
+    maxState(rule_execution_time_ms)      AS max_rule_time,
+    uniqState(actor_id)                   AS unique_actors,
+    uniqState(ifNull(merchant_id, ''))    AS unique_merchants
+FROM fraudbuster.events
+GROUP BY hour_start, event_name;
+
+-- ============================================
+-- 8. DASHBOARD STATS (5-MINUTE WINDOWS)
+-- ============================================
+-- Same metrics at 5-minute granularity for the Last Hour charts. TTL matches
+-- fraud_realtime_5min (7 days) — hourly stats cover longer windows.
+CREATE MATERIALIZED VIEW IF NOT EXISTS fraudbuster.dashboard_stats_5min
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(window_start)
+ORDER BY (window_start, event_name)
+TTL window_start + INTERVAL 7 DAY
+POPULATE
+AS SELECT
+    toStartOfFiveMinutes(timestamp)       AS window_start,
+    event_name,
+    countState()                          AS event_count,
+    sumState(toUInt64(rules_triggered_count > 0)) AS fraud_count,
+    sumState(toUInt64(rules_triggered_count)) AS rules_triggered,
+    sumState(toFloat64(amount))           AS total_amount,
+    avgState(toFloat64(rule_execution_time_ms)) AS avg_rule_time,
+    minState(rule_execution_time_ms)      AS min_rule_time,
+    maxState(rule_execution_time_ms)      AS max_rule_time,
+    uniqState(actor_id)                   AS unique_actors,
+    uniqState(ifNull(merchant_id, ''))    AS unique_merchants
+FROM fraudbuster.events
+GROUP BY window_start, event_name;
