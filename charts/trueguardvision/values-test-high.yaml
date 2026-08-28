@@ -59,7 +59,7 @@ externalDatabases:
     url: "http://172.31.43.197:8123"
     database: "fraudbuster"
     user: "default"
-    password: "TestHighCh2026!"
+    password: "Test123!"
 
 dragonfly:
   image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.40.1
