@@ -78,10 +78,10 @@ dragonfly:
   resources:
     requests:
       cpu: "6"
-      memory: 8Gi
+      memory: 12Gi
     limits:
       cpu: "7"
-      memory: 12Gi
+      memory: 14Gi
 
 engine:
   image: ghcr.io/fraudmanagement/fraudengine:main
@@ -108,11 +108,11 @@ engine:
   # c6i.2xlarge (8 vCPU/16 GB) dedike node
   resources:
     requests:
-      cpu: "6"
-      memory: 6Gi
+      cpu: "14"
+      memory: 16Gi
     limits:
-      cpu: "7"
-      memory: 12Gi
+      cpu: "15"
+      memory: 28Gi
   tuning:
     FRAUDBUSTER_THREAD_POOL_SIZE: "32"
     FRAUDBUSTER_CLICKHOUSE_BATCH_SIZE: "5000"
@@ -190,11 +190,11 @@ simulator:
     # 40k TPS'te %11 CPU throttling ölçülmüştü.)
     resources:
       requests:
-        cpu: "6"
-        memory: 4Gi
+        cpu: "15"
+        memory: 16Gi
       limits:
-        cpu: "7"
-        memory: 8Gi
+        cpu: "16"
+        memory: 28Gi
   ui:
     image: ghcr.io/fraudmanagement/eventsimulator-ui:latest
     pullPolicy: "Always"
