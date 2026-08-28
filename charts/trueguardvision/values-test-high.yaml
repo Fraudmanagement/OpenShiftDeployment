@@ -52,11 +52,11 @@ externalDatabases:
   mongodb:
     # Change stream'ler için replicaSet=rs0 + directConnection=true ŞART
     # 172.31.20.193 → mongodb EC2'sinin PRIVATE IP'si
-    uri: "mongodb://172.31.20.193:27017/fraudmanagement?replicaSet=rs0&directConnection=true&maxPoolSize=50&minPoolSize=10&maxIdleTimeMS=60000&waitQueueTimeoutMS=5000&serverSelectionTimeoutMS=5000"
+    uri: "mongodb://172.31.37.247:27017/fraudmanagement?replicaSet=rs0&directConnection=true&maxPoolSize=50&minPoolSize=10&maxIdleTimeMS=60000&waitQueueTimeoutMS=5000&serverSelectionTimeoutMS=5000"
     database: "fraudmanagement"
   clickhouse:
     # 172.31.84.214 → clickhouse EC2'sinin PRIVATE IP'si
-    url: "http://172.31.84.214:8123"
+    url: "http://172.31.43.197:8123"
     database: "fraudbuster"
     user: "default"
     password: "TestHighCh2026!"
@@ -201,7 +201,7 @@ simulator:
     nodeEnv: "production"
     # Tarayıcının sim-engine'e gideceği DIŞ adres (NodePort; Route yok).
     # IP = herhangi bir node'un public IP'si; stop/start'ta değişirse güncelle.
-    enginePublicUrl: "http://54.198.253.196:30707"
+    enginePublicUrl: "http://98.91.247.234:30707"
     resources:
       requests:
         cpu: "250m"
