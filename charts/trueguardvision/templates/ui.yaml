@@ -41,8 +41,8 @@ spec:
               value: {{ .Values.ui.jwtExpiresIn | quote }}
             - name: MONGODB_URI
               valueFrom:
-                configMapKeyRef:
-                  name: external-db
+                secretKeyRef:
+                  name: fraudbuster-secrets
                   key: FRAUDBUSTER_MONGODB_URI
             - name: MONGOOSE_AUTO_INDEX
               value: {{ .Values.ui.mongooseAutoIndex | quote }}

@@ -1,0 +1,51 @@
+client-example-check-audit.txtClient Connect
+--------------
+mongosh "mongodb://fraud_app:b3rnacGEVL7yME35ZpiNLHnPWuPveDL1@localhost:27017/fraudmanagement?replicaSet=rs0&directConnection=true"
+mongosh "mongodb://fraud_app:b3rnacGEVL7yME35ZpiNLHnPWuPveDL1@3.91.26.24:27017/fraudmanagement?replicaSet=rs0&directConnection=true"
+
+Admin Client Connect
+--------------------
+mongosh "mongodb://fraud_admin:hEifC9JB+RQp5Xj++oeeBQznx5CJXUgG@localhost:27017/admin?directConnection=true"
+mongosh "mongodb://fraud_admin:hEifC9JB+RQp5Xj++oeeBQznx5CJXUgG@3.91.26.24:27017/admin?directConnection=true"
+
+SSH and check audit logs
+------------------------
+ssh ubuntu@3.91.26.24
+
+sudo grep -F '"authenticate"' /var/log/mongodb/audit.json | tail -n 1 | jq .
+
+--- output ---
+ubuntu@perconadb:~$ sudo grep -F '"authenticate"' /var/log/mongodb/audit.json | tail -n 1 | jq .
+{
+  "atype": "authenticate",
+  "ts": {
+    "$date": "2026-09-03T23:36:05.811+00:00"
+  },
+  "local": {
+    "ip": "172.31.36.102",
+    "port": 27017
+  },
+  "remote": {
+    "ip": "172.31.32.93",
+    "port": 19109
+  },
+  "users": [
+    {
+      "user": "fraud_app",
+      "db": "fraudmanagement"
+    }
+  ],
+  "roles": [
+    {
+      "role": "readWrite",
+      "db": "fraudmanagement"
+    }
+  ],
+  "param": {
+    "user": "fraud_app",
+    "db": "fraudmanagement",
+    "mechanism": "SCRAM-SHA-256"
+  },
+  "result": 0
+}
+--- output ---

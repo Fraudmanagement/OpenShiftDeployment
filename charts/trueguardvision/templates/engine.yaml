@@ -52,8 +52,8 @@ spec:
                   key: JWT_SECRET
             - name: FRAUDBUSTER_MONGODB_URI
               valueFrom:
-                configMapKeyRef:
-                  name: external-db
+                secretKeyRef:
+                  name: fraudbuster-secrets
                   key: FRAUDBUSTER_MONGODB_URI
             - name: FRAUDBUSTER_MONGODB_DATABASE
               valueFrom:

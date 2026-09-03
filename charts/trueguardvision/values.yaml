@@ -21,9 +21,15 @@ auth:
 
 externalDatabases:
   mongodb:
-    # Change stream'ler için replicaSet=rs0 + directConnection=true ŞART
-    uri: "mongodb://MONGO_VM_IP:27017/fraudmanagement?replicaSet=rs0&directConnection=true&maxPoolSize=50&minPoolSize=10&maxIdleTimeMS=60000&waitQueueTimeoutMS=5000&serverSelectionTimeoutMS=5000"
+    # URI templates/secrets.yaml içinde parçalardan birleştirilir.
+    # user boş bırakılırsa URI'ye kimlik bilgisi eklenmez.
+    host: "MONGO_VM_IP"
+    port: 27017
+    user: ""
+    password: ""      # dosyaya yazmayın, --set ile verin
     database: "fraudmanagement"
+    # Change stream'ler için replicaSet=rs0 + directConnection=true ŞART
+    params: "replicaSet=rs0&directConnection=true&maxPoolSize=50&minPoolSize=10&maxIdleTimeMS=60000&waitQueueTimeoutMS=5000&serverSelectionTimeoutMS=5000"
   clickhouse:
     url: "http://CLICKHOUSE_VM_IP:8123"
     database: "fraudbuster"

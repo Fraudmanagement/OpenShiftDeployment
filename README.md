@@ -28,7 +28,7 @@ işletmeye dair başvuru kaynağıdır.
 | **FM Portal** (`fraudbuster-ui`) | Analist arayüzü: kural/aksiyon/liste yönetimi, incident takibi, raporlama | OpenShift |
 | **Dragonfly** | Redis uyumlu bellek-içi veri deposu; aktör profilleri, kayan pencere sayaçları (bucket), listeler — skorlamanın sıcak yolu | **OpenShift dışı** (banka ağında VM) |
 | **Event Simulator** (`eventsimulator-engine` / `-ui`) | Yük üreteci ve test arayüzü; yalnızca test/POC amaçlıdır, ürünün parçası değildir | OpenShift |
-| **MongoDB** | Kural/aksiyon/liste tanımları, kullanıcı ve roller, incident kayıtları; change stream ile Engine'e canlı yapılandırma akışı | **OpenShift dışı** (banka ağında VM) |
+| **MongoDB** (Percona Server) | Kural/aksiyon/liste tanımları, kullanıcı ve roller, incident kayıtları; change stream ile Engine'e canlı yapılandırma akışı | **OpenShift dışı** (banka ağında VM) |
 | **ClickHouse** | İşlenen tüm event'lerin kalıcı arşivi ve analitik sorgular (sütunsal OLAP veritabanı) | **OpenShift dışı** (banka ağında VM) |
 
 ### Akış (özet)
@@ -70,7 +70,7 @@ yüklenir; profil kurulumda `-f` ile verilir.
 | FM Portal | 8 CPU / 8 GB / 50 GB | OpenShift — genel worker |
 | Event Simulator Engine | 16 CPU / 16 GB / 100 GB | OpenShift — Engine'den FARKLI worker (ölçüm saflığı) |
 | Event Simulator UI | 2 CPU / 4 GB | OpenShift — genel worker |
-| MongoDB VM | 16 CPU / 32 GB / 300 GB | Cluster dışı, banka ağı, rs0 |
+| MongoDB VM (Percona Server) | 16 CPU / 32 GB / 300 GB | Cluster dışı, banka ağı, rs0 — audit yapılandırmalı |
 | ClickHouse VM | 16 CPU / 32 GB / 1 TB | Cluster dışı, banka ağı |
 
 Not: `FRAUDBUSTER_DRAGONFLY_SHARD_COUNT` env'i bilinçli olarak
@@ -86,8 +86,9 @@ kullanılmamaktadır — Engine, shard sayısını bağlantı sırasında Dragon
 ### Ön koşullar
 
 - OpenShift 4.x cluster'ı ve proje oluşturma yetkisi (`oc` girişi yapılmış olmalı)
-- MongoDB (replica set `rs0`) ve ClickHouse'un banka ağında kurulu ve
-  cluster'dan erişilebilir olması (kurulum için bkz. Bölüm 4)
+- Percona Server for MongoDB (replica set `rs0`, kimlik doğrulama açık) ve
+  ClickHouse'un banka ağında kurulu ve cluster'dan erişilebilir olması
+  (kurulum için bkz. Bölüm 4)
 - Dragonfly'ın banka ağındaki VM'de kurulu, ACL'i tanımlanmış ve cluster'dan
   erişilebilir olması (kurulum için bkz.
   [`dragonfly-setup/`](dragonfly-setup/dragonfly-setup-guideline-for-audit.md))
@@ -121,16 +122,19 @@ yüklenen tabandır; üzerine `-f` ile `values-customer.yaml` verilir.
 
 **Müşteri kurulumu** (üretim boyutlandırması):
 
-Kurulumdan önce `values-customer.yaml` içinde doldurun: `MONGO_VM_IP`,
-`CLICKHOUSE_VM_IP`, `engine.dragonflyHost` (Dragonfly VM'inin IP'si) ve
-`ChangeMe*` parolaları. Kurulum komutu:
+Kurulumdan önce `values-customer.yaml` içinde doldurun:
+`externalDatabases.mongodb.host`, `externalDatabases.clickhouse.url`,
+`engine.dragonflyHost` ve `ChangeMe*` parolaları. Şifreler (`--set` ile
+verilir): registry token'ı, Dragonfly ACL şifresi ve MongoDB uygulama
+kullanıcısının şifresi. Kurulum komutu:
 
 ```bash
 helm install trueguardvision ./charts/trueguardvision -n fraud-poc --create-namespace \
   -f charts/trueguardvision/values-customer.yaml \
   --set clusterDomain=apps.rosa.altay.6j68.p3.openshiftapps.com \
   --set imagePullSecret.token=ghp_**** \
-  --set engine.dragonflyPassword='<engine ACL sifresi>'
+  --set engine.dragonflyPassword='<engine ACL sifresi>' \
+  --set externalDatabases.mongodb.password='<fraud_app sifresi>'
 ```
 
 `engine.dragonflyPassword`, Dragonfly VM'inde tanımlanan `engine` ACL
@@ -169,7 +173,8 @@ helm upgrade trueguardvision ./charts/trueguardvision -n fraud-poc \
   -f charts/trueguardvision/values-customer.yaml \
   --set clusterDomain=apps.<domain> \
   --set imagePullSecret.token=ghp_**** \
-  --set engine.dragonflyPassword='<engine ACL sifresi>'
+  --set engine.dragonflyPassword='<engine ACL sifresi>' \
+  --set externalDatabases.mongodb.password='<fraud_app sifresi>'
 ```
 
 3. Ne olacağını bilin: yalnızca spec'i değişen pod'lar yeniden oluşturulur.
@@ -232,7 +237,7 @@ kurulum script'leriyle kurulur (Ubuntu/Debian ve RHEL ailesi desteklenir).
 (`<VM_IP>` yerine sunucunun adresini yazın):
 
 ```bash
-scp scripts/setup-mongodb.sh scripts/setup-clickhouse.sh \
+scp scripts/setup-percona-mongodb.sh scripts/setup-clickhouse.sh \
     scripts/clickhouse-01-init.sql scripts/clickhouse-02-views.sql \
     ubuntu@<VM_IP>:
 ```
@@ -243,16 +248,24 @@ Sunucuya bağlanıp script'leri sırasıyla çalıştırın:
 
 ```bash
 ssh ubuntu@<VM_IP>
-sudo bash setup-mongodb.sh
+sudo bash setup-percona-mongodb.sh '<MONGO_ADMIN_SIFRESI>' '<MONGO_APP_SIFRESI>'
 sudo bash setup-clickhouse.sh '<CLICKHOUSE_SIFRESI>'
 ```
 
-- `setup-mongodb.sh` — MongoDB 7'yi tek node'lu `rs0` replica set olarak
-  kurar (change stream'ler için zorunlu) ve `PRIMARY` durumunu doğrular.
+- `setup-percona-mongodb.sh` — Percona Server for MongoDB 7'yi tek node'lu
+  `rs0` replica set olarak kurar (change stream'ler için zorunlu), kimlik
+  doğrulamayı keyFile ile birlikte etkinleştirir, `fraud_admin` ve `fraud_app`
+  kullanıcılarını oluşturur ve audit kaydını açar (bkz. Bölüm 9.3).
+  `<MONGO_APP_SIFRESI>`, kurulumda `--set externalDatabases.mongodb.password`
+  ile verilen değerle aynı olmalıdır.
 - `setup-clickhouse.sh` — ClickHouse'u kurar, `default` kullanıcısına
-  argüman olarak verilen şifreyi atar, şemayı ve analitik view'ları yükler.
-  Bu şifre, kurulumda kullanılan `externalDatabases.clickhouse.password`
-  değeriyle aynı olmalıdır.
+  argüman olarak verilen şifreyi atar, şemayı ve analitik view'ları yükler,
+  audit için `session_log`'u etkinleştirir (bkz. Bölüm 9.2). Bu şifre,
+  kurulumda kullanılan `externalDatabases.clickhouse.password` değeriyle aynı
+  olmalıdır.
+
+Not: `scripts/setup-mongodb.sh` (MongoDB Community kurulumu) referans olarak
+korunmaktadır; audit gereksinimi nedeniyle Percona script'i kullanılır.
 
 ### Açılması gereken portlar
 
@@ -352,7 +365,7 @@ Tek bir bileşeni izlemek için: `oc logs -f deploy/fraudbuster-be -n fraud-poc`
 | Bileşen | Referans verilen yer | Gereksinim |
 |---|---|---|
 | Dragonfly | `engine.dragonfly*` alanları | ACL tanımlı olmalı, `engine` kullanıcısının şifresi `--set` ile verilmeli; 6379/TCP cluster node'larına açık (kurulum: [`dragonfly-setup/`](dragonfly-setup/dragonfly-setup-guideline-for-audit.md)) |
-| MongoDB | `externalDatabases.mongodb.uri` | Replica set `rs0` zorunlu (change stream'ler için), URI'de `replicaSet=rs0&directConnection=true` korunmalı; 27017/TCP cluster node'larına açık |
+| MongoDB | `externalDatabases.mongodb.*` alanları | Replica set `rs0` zorunlu (change stream'ler için), `params` içinde `replicaSet=rs0&directConnection=true` korunmalı; uygulama kullanıcısının şifresi `--set` ile verilmeli; 27017/TCP cluster node'larına açık |
 | ClickHouse | `externalDatabases.clickhouse.*` | `events` şeması kurulmuş olmalı (kurulum script'leri ürün paketiyle verilir); 8123/TCP cluster node'larına açık |
 | İmaj registry'si | `imagePullSecret.*` ve `*.image` alanları | ghcr.io'ya çıkış ya da imajların banka registry'sine mirror'ı |
 
@@ -370,7 +383,10 @@ Tek bir bileşeni izlemek için: `oc logs -f deploy/fraudbuster-be -n fraud-poc`
 | `imagePullSecret.registry/username/token` | — | Registry kimlik bilgileri; **token values dosyasına yazılmamalı**, `--set` ile verilmelidir |
 | `auth.jwtSecret` | örnek değer | Engine ve Portal'ın paylaştığı JWT imza anahtarı — üretimde `openssl rand -base64 48` ile üretin |
 | `auth.adminEmail` / `adminPassword` | örnek değer | İlk açılışta oluşturulan admin hesabı |
-| `externalDatabases.mongodb.uri` | örnek değer | MongoDB bağlantı URI'si (rs0 + directConnection parametreleriyle) |
+| `externalDatabases.mongodb.host` / `port` | örnek değer / `27017` | MongoDB VM'inin adresi ve portu |
+| `externalDatabases.mongodb.user` | `fraud_app` | Uygulama kullanıcısı. Boş bırakılırsa URI'ye kimlik bilgisi eklenmez |
+| `externalDatabases.mongodb.password` | boş | **values dosyasına yazılmamalı**, `--set` ile verilmelidir. Secret içinde saklanır, URI'ye encode edilerek eklenir |
+| `externalDatabases.mongodb.params` | `replicaSet=rs0&directConnection=true&...` | Bağlantı parametreleri — change stream'ler için `replicaSet` ve `directConnection` korunmalı |
 | `externalDatabases.mongodb.database` | `fraudmanagement` | Veritabanı adı |
 | `externalDatabases.clickhouse.url` | örnek değer | ClickHouse HTTP adresi (`http://<ip>:8123`) |
 | `externalDatabases.clickhouse.database/user/password` | `fraudbuster` / `default` / örnek | ClickHouse erişim bilgileri |
@@ -451,6 +467,22 @@ Tüm iş yükleri OpenShift'in varsayılan `restricted-v2` SCC'si ile çalışı
 
 Platformun kullandığı veri katmanlarında, uygulama dışından yapılan
 erişimlerin kayıt altına alınması için audit yapılandırmaları uygulanır.
+
+### Audit kayıtlarına erişim
+
+| Sistem | Audit kaydı nerede | Format | Nasıl okunur |
+|---|---|---|---|
+| **Dragonfly** | `/var/log/dragonfly-audit/<oturum>.log`<br>`/var/log/dragonfly-audit/<oturum>.timing` | Metin (başlık + terminal oturumu) | `sudo cat <dosya>`<br>`scriptreplay --timing=<...>.timing <...>.log` |
+| **ClickHouse** | `system.session_log` tablosu<br>`system.query_log` tablosu | Tablo (veritabanı içinde) | `clickhouse client` ile SQL sorgusu |
+| **Percona Server for MongoDB** | `/var/log/mongodb/audit.json` | JSON satırları | `sudo tail -n 5 ... \| jq .`<br>`sudo grep -F '"authenticate"' ... \| jq .` |
+
+Kaydedilen bilgiler:
+
+| Sistem | Kaydedilen |
+|---|---|
+| **Dragonfly** | Oturum başına: Linux kullanıcısı, Dragonfly ACL kullanıcısı, kaynak IP, TTY, başlangıç/bitiş zamanı, girilen tüm komutlar ve dönen cevaplar |
+| **ClickHouse** | `session_log`: bağlantı ve kimlik doğrulama olayları — kullanıcı, kaynak IP, doğrulama yöntemi, `LoginSuccess` / `LoginFailure` / `Logout`<br>`query_log`: çalıştırılan her sorgu — kullanıcı, kaynak IP, sorgu metni, sorgu türü, süre, hata durumu |
+| **Percona Server for MongoDB** | Kimlik doğrulama, oturum kapanışı, kullanıcı ve rol değişiklikleri, veritabanı/koleksiyon/index oluşturma ve silme, yönetimsel komutlar — kullanıcı, rolleri, kaynak IP, kimlik doğrulama yöntemi, sonuç kodu |
 
 ### 9.1 Dragonfly Audit
 
@@ -579,5 +611,71 @@ saklama süresi TTL ayarıyla yönetilir.
 
 **Örnek sorgular ve çıktılar:**
 [`clickhouse-audit/client-example-queries.txt`](clickhouse-audit/client-example-queries.txt)
+
+### 9.3 MongoDB Audit
+
+MongoDB tarafında **Percona Server for MongoDB** kullanılır. Percona Server,
+MongoDB Community'nin drop-in karşılığıdır — aynı wire protocol, aynı
+driver'lar, aynı port (27017) — ve MongoDB Community'de bulunmayan `auditLog`
+özelliğini sağlar. Uygulama tarafında kod değişikliği gerektirmez.
+
+Kurulum, replica set yapılandırması, kimlik doğrulama ve audit ayarları
+[`scripts/setup-percona-mongodb.sh`](scripts/setup-percona-mongodb.sh)
+script'i ile yapılır:
+
+```bash
+scp scripts/setup-percona-mongodb.sh ubuntu@<MONGO_VM_IP>:
+ssh ubuntu@<MONGO_VM_IP>
+sudo bash setup-percona-mongodb.sh '<ADMIN_SIFRE>' '<APP_SIFRE>'
+```
+
+**Kimlik doğrulama.** Script iki kullanıcı tanımlar ve `security.authorization`
+ile kimlik doğrulamayı zorunlu kılar; replica set internal authentication'ı
+için keyFile üretir.
+
+| Kullanıcı | Veritabanı | Rol | Kullanım |
+|---|---|---|---|
+| `fraud_admin` | `admin` | `root` | Yönetici erişimi |
+| `fraud_app` | `fraudmanagement` | `readWrite` | FM Engine ve FM Portal (change stream dahil) |
+
+Kimlik doğrulamasız erişim kabul edilmez; script kurulum sonunda bunu
+doğrular.
+
+**Audit kaydı.** `auditLog` yapılandırması kayıtları JSON formatında
+`/var/log/mongodb/audit.json` dosyasına yazar. Kaydedilen olaylar:
+kimlik doğrulama (`authenticate`), oturum kapanışı (`logout`), kullanıcı ve
+rol değişiklikleri, veritabanı/koleksiyon/index oluşturma ve silme, yönetimsel
+komutlar.
+
+Örnek kayıt:
+
+```json
+{
+  "atype": "authenticate",
+  "ts": { "$date": "2026-09-03T23:36:05.811+00:00" },
+  "local":  { "ip": "172.31.36.102", "port": 27017 },
+  "remote": { "ip": "172.31.32.93",  "port": 19109 },
+  "users": [ { "user": "fraud_app", "db": "fraudmanagement" } ],
+  "roles": [ { "role": "readWrite", "db": "fraudmanagement" } ],
+  "param": { "user": "fraud_app", "db": "fraudmanagement", "mechanism": "SCRAM-SHA-256" },
+  "result": 0
+}
+```
+
+Her kayıtta kullanıcı, rolleri, kaynak IP, kimlik doğrulama yöntemi, zaman
+damgası ve sonuç kodu yer alır.
+
+**Kayıtların incelenmesi:**
+
+```bash
+sudo tail -n 5 /var/log/mongodb/audit.json | jq .
+sudo grep -F '"authenticate"' /var/log/mongodb/audit.json | tail -n 1 | jq .
+```
+
+Kayıtlar dosya olarak tutulduğundan, merkezi log sistemine (SIEM) aktarım
+`rsyslog` ya da kurumun tercih ettiği log toplama ajanı ile sağlanır.
+
+**Bağlantı ve doğrulama örnekleri:**
+[`perconadb-audit/client-example-check-audit.txt`](perconadb-audit/client-example-check-audit.txt)
 
 ---

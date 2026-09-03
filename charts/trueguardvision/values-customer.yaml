@@ -27,30 +27,22 @@ auth:
 
 externalDatabases:
   mongodb:
-    # Change stream'ler için replicaSet=rs0 + directConnection=true ŞART
-    uri: "mongodb://MONGO_VM_IP:27017/fraudmanagement?replicaSet=rs0&directConnection=true&maxPoolSize=50&minPoolSize=10&maxIdleTimeMS=60000&waitQueueTimeoutMS=5000&serverSelectionTimeoutMS=5000"
+    host: "MONGO_VM_IP"
+    port: 27017
+    user: "fraud_app"
+    password: ""      # dosyaya yazmayın, --set ile verin
     database: "fraudmanagement"
+    # Change stream'ler için replicaSet=rs0 + directConnection=true ŞART
+    params: "replicaSet=rs0&directConnection=true&maxPoolSize=50&minPoolSize=10&maxIdleTimeMS=60000&waitQueueTimeoutMS=5000&serverSelectionTimeoutMS=5000"
   clickhouse:
     url: "http://CLICKHOUSE_VM_IP:8123"
     database: "fraudbuster"
     user: "default"
     password: "ChangeMeClickHouse!"
 
-dragonfly:
-  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0
-  pullPolicy: "Always"
-  maxmemory: "56gb"
-  proactorThreads: 32
-  storage: 300Gi
-  nodeSelector: {}
-  tolerations: []
-  resources:
-    requests:
-      cpu: "32"
-      memory: 64Gi
-    limits:
-      cpu: "32"
-      memory: 64Gi
+# Dragonfly chart tarafından deploy EDİLMİYOR. Cluster dışı VM'de standalone
+# çalışır; önerilen kapasite 32 CPU / 64 GB, --maxmemory 56gb,
+# --proactor_threads 32. Kurulum: dragonfly-setup/
 
 engine:
   image: ghcr.io/fraudmanagement/fraudengine:main
@@ -61,7 +53,12 @@ engine:
   rustBacktrace: "1"
   serverPort: "5432"        # Service/Route/probe portlarıyla birlikte düşünülmeli
   pluginDir: "/app/plugins"
-  redisUri: "redis://dragonfly:6379?pool_size=300&min_idle=50&connection_timeout=3&response_timeout=5"
+  # Dragonfly bağlantısı — URI templates/secrets.yaml içinde birleştirilir.
+  dragonflyHost: "DRAGONFLY_VM_IP"
+  dragonflyPort: 6379
+  dragonflyUser: "engine"
+  dragonflyPassword: ""     # ACL şifresi — dosyaya yazmayın, --set ile verin
+  dragonflyParams: "pool_size=300&min_idle=50&connection_timeout=3&response_timeout=5"
   bucketTtlSeconds: "86400"
   enableChangeStreams: "true"
   # Deployment güncelleme davranışı: Recreate (önce eskiyi kaldır — dar cluster için) | RollingUpdate
