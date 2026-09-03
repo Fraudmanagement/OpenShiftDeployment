@@ -508,4 +508,76 @@ Yapılandırma örnekleri kurulum dokümanında yer alır.
 | [`dragonfly-setup/dragonfly-audit-cli.sh`](../../dragonfly-setup/dragonfly-audit-cli.sh) | Audit wrapper script'i |
 | [`dragonfly-setup/setup-dragonfly-firewall`](../../dragonfly-setup/setup-dragonfly-firewall) | Firewall kurallarını uygulayan script |
 
+### 9.2 ClickHouse Audit
+
+ClickHouse, erişim ve sorgu kayıtlarını yerleşik sistem tablolarında tutar;
+ek bir bileşen kurulmasını gerektirmez. Kurulum script'i
+(`scripts/setup-clickhouse.sh`) bu kayıtların üretilmesi için gerekli
+yapılandırmayı uygular.
+
+| Tablo | İçerik |
+|---|---|
+| `system.session_log` | Bağlantı ve kimlik doğrulama olayları — kullanıcı, kaynak IP, doğrulama yöntemi, interface, `LoginSuccess` / `LoginFailure` / `Logout` |
+| `system.query_log` | Çalıştırılan her sorgu — kullanıcı, kaynak IP, sorgu metni, sorgu türü, süre, işlenen satır sayısı, hata durumu |
+
+`query_log` varsayılan olarak etkindir. `session_log` ise kurulum script'i
+tarafından `/etc/clickhouse-server/config.d/fraudbuster-session-log.xml`
+dosyasıyla etkinleştirilir:
+
+```xml
+<clickhouse>
+    <session_log>
+        <database>system</database>
+        <table>session_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </session_log>
+</clickhouse>
+```
+
+**Bağlantı ve sorgulama.** Kayıtlar standart client ile incelenir:
+
+```bash
+clickhouse client --host <CLICKHOUSE_VM_IP> --user default --password '<SIFRE>'
+```
+
+Bağlantı olayları:
+
+```sql
+SELECT event_time, type, user, auth_type, client_address, interface
+FROM system.session_log
+ORDER BY event_time DESC
+LIMIT 10;
+```
+
+```
+┌──────────event_time─┬─type─────────┬─user────┬─auth_type───────┬─client_address─────────┬─interface─┐
+│ 2026-09-03 22:41:31 │ LoginSuccess │ default │ SHA256_PASSWORD │ ::ffff:176.237.230.161 │ TCP       │
+│ 2026-09-03 22:41:34 │ Logout       │ default │ SHA256_PASSWORD │ ::ffff:176.237.230.161 │ TCP       │
+└─────────────────────┴──────────────┴─────────┴─────────────────┴────────────────────────┴───────────┘
+```
+
+Çalıştırılan sorgular:
+
+```sql
+SELECT event_time, type, user, address, query_kind, substring(query, 1, 60) AS q
+FROM system.query_log
+ORDER BY event_time DESC
+LIMIT 10;
+```
+
+Kayıtların varlığı ve boyutu:
+
+```sql
+SELECT name, total_rows, formatReadableSize(total_bytes) AS size
+FROM system.tables
+WHERE database = 'system' AND name IN ('session_log', 'query_log');
+```
+
+Kayıtlar ClickHouse içinde tablo olarak tutulduğundan, merkezi log sistemine
+(SIEM) aktarım periyodik sorgu ya da doğrudan bağlantı ile sağlanabilir;
+saklama süresi TTL ayarıyla yönetilir.
+
+**Örnek sorgular ve çıktılar:**
+[`clickhouse-audit/client-example-queries.txt`](../../clickhouse-audit/client-example-queries.txt)
+
 ---

@@ -65,6 +65,19 @@ cat > /etc/clickhouse-server/config.d/fraudbuster-listen.xml <<EOF
 </clickhouse>
 EOF
 
+# Audit: session_log varsayilan olarak KAPALIDIR; acilmadan system.session_log
+# tablosu olusmaz. Baglanti/kimlik dogrulama olaylarini (kim, ne zaman, hangi
+# IP'den, basarili mi) kaydeder. query_log varsayilan olarak aciktir.
+cat > /etc/clickhouse-server/config.d/fraudbuster-session-log.xml <<'EOF'
+<clickhouse>
+    <session_log>
+        <database>system</database>
+        <table>session_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </session_log>
+</clickhouse>
+EOF
+
 # Sifre SHA256 olarak saklanir.
 PASS_SHA=$(echo -n "$CH_PASSWORD" | sha256sum | awk '{print $1}')
 cat > /etc/clickhouse-server/users.d/fraudbuster-default-password.xml <<EOF
