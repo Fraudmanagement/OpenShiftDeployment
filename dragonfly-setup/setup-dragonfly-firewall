@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+DFLY_HOST="127.0.0.1"
+DFLY_PORT="6379"
+
+echo "Backing up current iptables rules..."
+iptables-save > "/root/iptables-backup-$(date +%Y%m%d-%H%M%S).rules"
+
+echo "Allowing root access..."
+iptables -I OUTPUT 1 \
+    -o lo \
+    -p tcp \
+    -d "$DFLY_HOST" \
+    --dport "$DFLY_PORT" \
+    -m owner \
+    --uid-owner root \
+    -j ACCEPT
+
+echo "Allowing fraudengine access..."
+iptables -I OUTPUT 2 \
+    -o lo \
+    -p tcp \
+    -d "$DFLY_HOST" \
+    --dport "$DFLY_PORT" \
+    -m owner \
+    --uid-owner fraudengine \
+    -j ACCEPT
+
+echo "Blocking all other local users..."
+iptables -I OUTPUT 3 \
+    -o lo \
+    -p tcp \
+    -d "$DFLY_HOST" \
+    --dport "$DFLY_PORT" \
+    -j REJECT \
+    --reject-with tcp-reset
+
+echo
+echo "Current Dragonfly firewall rules:"
+iptables -L OUTPUT -n -v --line-numbers | grep -E 'Chain OUTPUT|6379'

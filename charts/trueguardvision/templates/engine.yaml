@@ -21,29 +21,6 @@ spec:
       labels:
         app: fraudbuster-be
     spec:
-      {{- $dp := .Values.engine.dragonflyPlacement }}
-      {{- if not (has $dp (list "colocate" "separate" "none")) }}
-      {{- fail (printf "engine.dragonflyPlacement gecersiz: %q (colocate|separate|none)" $dp) }}
-      {{- end }}
-      {{- if eq $dp "colocate" }}
-      # FM Engine, Dragonfly ile AYNI node'a yerleşmek zorunda
-      affinity:
-        podAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels:
-                  app: dragonfly
-              topologyKey: kubernetes.io/hostname
-      {{- else if eq $dp "separate" }}
-      # FM Engine, Dragonfly'dan FARKLI node'a yerleşmek zorunda
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels:
-                  app: dragonfly
-              topologyKey: kubernetes.io/hostname
-      {{- end }}
       imagePullSecrets:
         - name: {{ .Values.imagePullSecret.name }}
       {{- with .Values.engine.nodeSelector }}
@@ -84,7 +61,10 @@ spec:
                   name: external-db
                   key: MONGODB_DATABASE
             - name: FRAUDBUSTER_REDIS_URI
-              value: {{ .Values.engine.redisUri | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: fraudbuster-secrets
+                  key: FRAUDBUSTER_REDIS_URI
             - name: FRAUDBUSTER_CLICKHOUSE_URL
               valueFrom:
                 configMapKeyRef:

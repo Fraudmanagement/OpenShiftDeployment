@@ -3,32 +3,39 @@
 # OpenShift'e ÖZGÜ hiçbir obje üretmez: routes.enabled=false (Route CRD yok).
 # Dış erişim chart dışından verilir: ../../k8s/nodeport-services.yaml
 #
+# AUDIT profili: Dragonfly cluster DIŞINDA standalone EC2'de çalışır. Custom
+# audit (ACL + sudo wrapper + oturum kaydı) o makinede kuruludur; chart yalnız
+# bağlantıyı kurar. Kurulum: lev2026/kubernetes-aws-test-high-setup/
+#
 # Topoloji (her yük kendi node'unda; label+taint node'lara elle basılır):
 #   control-plane  t3.medium    — k8s CP + Headlamp
-#   worker-df      c6i.2xlarge  — dragonfly     (role=dragonfly, dedicated=dragonfly:NoSchedule)
 #   worker-engine  c6i.2xlarge  — fraud engine  (role=engine,    dedicated=engine:NoSchedule)
 #   worker-sim     c6i.xlarge   — sim engine    (role=simulator, dedicated=simulator:NoSchedule)
 #   worker-ui      m6i.large    — fraudbuster-ui + simulator-ui (taint'siz tek node → UI'lar buraya düşer)
+#   dragonfly      c6i.2xlarge  — cluster DIŞI EC2 (standalone + audit)
 #   clickhouse     m6i.2xlarge  — cluster DIŞI EC2
 #   mongodb        m6i.xlarge   — cluster DIŞI EC2
 #
 # Node hazırlığı (bir kere, CP'den):
-#   kubectl label node worker-df     role=dragonfly
 #   kubectl label node worker-engine role=engine
 #   kubectl label node worker-sim    role=simulator
-#   kubectl taint node worker-df     dedicated=dragonfly:NoSchedule
 #   kubectl taint node worker-engine dedicated=engine:NoSchedule
 #   kubectl taint node worker-sim    dedicated=simulator:NoSchedule
 #
-# NOT: dragonfly StatefulSet'i 10Gi PVC ister; kubeadm'de default StorageClass
-# yok → önce local-path-provisioner kur (yoksa pod Pending kalır):
-#   kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
-#   kubectl patch storageclass local-path -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+# worker-df artık gerekmiyor. Eski kurulumdan kalan label/taint varsa temizle:
+#   kubectl label node worker-df role-
+#   kubectl taint node worker-df dedicated-
+#
+# NOT: Dragonfly PVC'si kalktığı için local-path-provisioner artık ŞART DEĞİL.
+#
+# NOT: Dragonfly EC2'sinin security group'unda 6379 inbound, k8s worker
+# node'larının SG'sine açık olmalı; 0.0.0.0/0 KAPALI olmalı (audit gereği).
 #
 # Kullanım (repo kökünden):
 #   helm install trueguardvision ./charts/trueguardvision -n fraud-poc \
 #     --create-namespace -f charts/trueguardvision/values-test-high.yaml \
-#     --set imagePullSecret.token=ghp_XXX
+#     --set imagePullSecret.token=ghp_XXX \
+#     --set engine.dragonflyPassword='<engine ACL sifresi>'
 #   kubectl apply -n fraud-poc -f k8s/nodeport-services.yaml
 # =============================================================================
 
@@ -61,27 +68,9 @@ externalDatabases:
     user: "default"
     password: "Test123!"
 
-dragonfly:
-  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.40.1
-  pullPolicy: "Always"
-  # c6i.2xlarge (8 vCPU/16 GB) dedike node: thread = CPU kuralı; 1 vCPU
-  # kubelet/flannel'a bırakıldı. Engine shard sayısını canlıdan öğrenir.
-  maxmemory: "10gb"
-  proactorThreads: 7
-  storage: 10Gi
-  nodeSelector:
-    role: dragonfly
-  tolerations:
-    - key: dedicated
-      value: dragonfly
-      effect: NoSchedule
-  resources:
-    requests:
-      cpu: "6"
-      memory: 12Gi
-    limits:
-      cpu: "7"
-      memory: 14Gi
+# Dragonfly chart tarafından deploy EDİLMİYOR. Cluster dışı EC2'de standalone:
+#   sürüm v1.40.1 · maxmemory 10gb · proactor_threads 7 (c6i.2xlarge, 8 vCPU/16 GB)
+# Bu değerler /etc/dragonfly/dragonfly.conf içinde elle ayarlıdır.
 
 engine:
   image: ghcr.io/fraudmanagement/fraudengine:main
@@ -92,13 +81,15 @@ engine:
   rustBacktrace: "0"
   serverPort: "5432"        # Service/Route/probe portlarıyla birlikte düşünülmeli
   pluginDir: "/app/plugins"
-  redisUri: "redis://dragonfly:6379?pool_size=300&min_idle=50&connection_timeout=3&response_timeout=5"
+  # 172.31.76.49 → dragonfly EC2'sinin PRIVATE IP'si
+  dragonflyHost: "172.31.76.49"
+  dragonflyPort: 6379
+  dragonflyUser: "engine"
+  dragonflyPassword: ""     # ACL şifresi — dosyaya yazmayın, --set ile verin
+  dragonflyParams: "pool_size=300&min_idle=50&connection_timeout=3&response_timeout=5"
   bucketTtlSeconds: "86400"
   enableChangeStreams: "true"
   updateStrategy: "Recreate"
-  # Yerleşim affinity ile değil nodeSelector+taint ile: placement none ŞART,
-  # colocate/separate affinity'leri nodeSelector'la çelişip Pending üretir.
-  dragonflyPlacement: "none"
   nodeSelector:
     role: engine
   tolerations:
@@ -185,7 +176,8 @@ simulator:
     pullPolicy: "Always"
     port: "7070"
     db: "/data/simulator.db"
-    # nodeSelector+taint yerleşimi: none ŞART (engine.dragonflyPlacement notu)
+    # Yerleşim affinity ile değil nodeSelector+taint ile: none ŞART,
+    # colocate/separate affinity'leri nodeSelector'la çelişip Pending üretir.
     fraudEnginePlacement: "none"
     nodeSelector:
       role: simulator

@@ -14,6 +14,7 @@ işletmeye dair başvuru kaynağıdır.
 6. [Kapsam (OpenShift içi ve dışı)](#6-kapsam-openshift-içi-ve-dışı)
 7. [Values Referansı](#7-values-referansı)
 8. [Güvenlik ve Ağ](#8-güvenlik-ve-ağ)
+9. [Audit](#9-audit)
 
 ---
 
@@ -25,7 +26,7 @@ işletmeye dair başvuru kaynağıdır.
 |---|---|---|
 | **FM Engine** (`fraudbuster-be`) | Event skorlama, kural değerlendirme, incident üretimi (Rust) | OpenShift |
 | **FM Portal** (`fraudbuster-ui`) | Analist arayüzü: kural/aksiyon/liste yönetimi, incident takibi, raporlama | OpenShift |
-| **Dragonfly** (`dragonfly`) | Redis uyumlu bellek-içi veri deposu; aktör profilleri, kayan pencere sayaçları (bucket), listeler — skorlamanın sıcak yolu | OpenShift |
+| **Dragonfly** | Redis uyumlu bellek-içi veri deposu; aktör profilleri, kayan pencere sayaçları (bucket), listeler — skorlamanın sıcak yolu | **OpenShift dışı** (banka ağında VM) |
 | **Event Simulator** (`eventsimulator-engine` / `-ui`) | Yük üreteci ve test arayüzü; yalnızca test/POC amaçlıdır, ürünün parçası değildir | OpenShift |
 | **MongoDB** | Kural/aksiyon/liste tanımları, kullanıcı ve roller, incident kayıtları; change stream ile Engine'e canlı yapılandırma akışı | **OpenShift dışı** (banka ağında VM) |
 | **ClickHouse** | İşlenen tüm event'lerin kalıcı arşivi ve analitik sorgular (sütunsal OLAP veritabanı) | **OpenShift dışı** (banka ağında VM) |
@@ -35,8 +36,8 @@ işletmeye dair başvuru kaynağıdır.
 ```
   Event Kaynağı                 ┌──────────────────── OpenShift ────────────────────┐
   (POC'de: Event Simulator,    │                                                    │
-   üretimde: banka sistemleri) │   FM ENGINE ◄────────► DRAGONFLY (sayaçlar, RAM)   │
-        │  POST /events (JWT)  │      │                                             │
+   üretimde: banka sistemleri) │   FM ENGINE ──────────► DRAGONFLY VM (6379/TCP)    │
+        │  POST /events (JWT)  │      │                    (sayaçlar, RAM)          │
         └──────────────────────┼─────►│  1. sayaçları oku/güncelle                  │
                                │      │  2. kuralları çalıştır                      │
   Fraud Analisti               │      │  3. tetiklenirse → MongoDB'ye incident      │
@@ -45,9 +46,10 @@ işletmeye dair başvuru kaynağıdır.
                                │      │  kural/liste tanımı → MongoDB               │
                                └──────┼─────────────────────────────────────────────┘
                                       ▼
-                    MongoDB (yapılandırma + incident)      ClickHouse (arşiv + rapor)
-                    — change stream ile kural değişikliği   — Portal raporları buradan
-                      Engine'e anında yansır                  sorgular
+        Dragonfly (sayaçlar)   MongoDB (yapılandırma + incident)   ClickHouse (arşiv)
+        — cluster dışı VM,     — change stream ile kural           — Portal raporları
+          audit yapılandırmalı   değişikliği Engine'e anında         buradan sorgular
+                                 yansır
 ```
 
 ---
@@ -64,8 +66,7 @@ yüklenir; profil kurulumda `-f` ile verilir.
 | Bileşen | CPU / RAM / Disk | Yerleşim |
 |---|---|---|
 | FM Engine | 32 CPU / 64 GB / 200 GB | OpenShift — dedicated hot-path worker |
-| Dragonfly | 32 CPU / 64 GB / 300 GB | OpenShift — Engine ile AYNI worker (podAffinity) |
-| Hot-path worker node | ≥ 70 CPU / ≥ 140 GB | `fm-hotpath=true` label + taint; yalnız Engine+Dragonfly |
+| **Dragonfly VM** | 32 CPU / 64 GB / 300 GB | **Cluster dışı, banka ağı** — audit yapılandırmalı |
 | FM Portal | 8 CPU / 8 GB / 50 GB | OpenShift — genel worker |
 | Event Simulator Engine | 16 CPU / 16 GB / 100 GB | OpenShift — Engine'den FARKLI worker (ölçüm saflığı) |
 | Event Simulator UI | 2 CPU / 4 GB | OpenShift — genel worker |
@@ -74,8 +75,9 @@ yüklenir; profil kurulumda `-f` ile verilir.
 
 Not: `FRAUDBUSTER_DRAGONFLY_SHARD_COUNT` env'i bilinçli olarak
 kullanılmamaktadır — Engine, shard sayısını bağlantı sırasında Dragonfly'dan
-(`INFO thread_count`) otomatik öğrenir; tek ayar noktası
-`dragonfly.proactorThreads` alanıdır.
+(`INFO thread_count`) otomatik öğrenir; tek ayar noktası Dragonfly VM'indeki
+`--proactor_threads` parametresidir (bkz.
+[`dragonfly-setup/`](../../dragonfly-setup/dragonfly-setup-guideline-for-audit.md)).
 
 ---
 
@@ -86,36 +88,30 @@ kullanılmamaktadır — Engine, shard sayısını bağlantı sırasında Dragon
 - OpenShift 4.x cluster'ı ve proje oluşturma yetkisi (`oc` girişi yapılmış olmalı)
 - MongoDB (replica set `rs0`) ve ClickHouse'un banka ağında kurulu ve
   cluster'dan erişilebilir olması (kurulum için bkz. Bölüm 4)
+- Dragonfly'ın banka ağındaki VM'de kurulu, ACL'i tanımlanmış ve cluster'dan
+  erişilebilir olması (kurulum için bkz.
+  [`dragonfly-setup/`](../../dragonfly-setup/dragonfly-setup-guideline-for-audit.md))
 - `ghcr.io/fraudmanagement` imajları için erişim token'ı (ya da imajların
   banka registry'sine mirror edilmiş olması)
 
 ### Kurulum
 
-**Pod yerleşimi:** İki values alanı, kritik pod'ların birbirine göre
-yerleşimini yönetir; ikisi de aynı üç değeri alır
-(`colocate` / `separate` / `none`):
-
-| Alan | Neyi yönetir |
-|---|---|
-| `engine.dragonflyPlacement` | FM Engine'in **Dragonfly'a** göre yerleşimi |
-| `simulator.engine.fraudEnginePlacement` | Event Simulator engine'inin **FM Engine'e** göre yerleşimi |
+**Pod yerleşimi:** `simulator.engine.fraudEnginePlacement` alanı, Event
+Simulator engine'inin FM Engine'e göre yerleşimini yönetir ve üç değer alır:
 
 | Değer | Davranış | Ne zaman |
 |---|---|---|
-| `colocate` | İlgili pod'lar AYNI node'a yerleşir (podAffinity, zorunlu) | Node kapasitesi iki iş yükünün limit toplamına bol geliyorsa (örn. adanmış ≥70 CPU worker) — node içi trafik, ağ gecikmesini sıfırlar |
+| `colocate` | İlgili pod'lar AYNI node'a yerleşir (podAffinity, zorunlu) | Node kapasitesi iki iş yükünün limit toplamına bol geliyorsa — node içi trafik, ağ gecikmesini sıfırlar |
 | `separate` | İlgili pod'lar FARKLI node'lara yerleşir (podAntiAffinity, zorunlu) | Dar node'larda CPU çekişmesini önlemek için; yük üreteci için her durumda önerilir (ölçüm sağlığı) |
 | `none` | Kural yok; scheduler serbest | Yerleşim önemli değilse |
 
-Varsayılan (`values-customer.yaml`): `dragonflyPlacement: separate`,
-`fraudEnginePlacement: separate`.
-
-Ölçüm notu: Bu chart'ın doğrulandığı test ortamında (2× 8 vCPU worker,
-10.000 TPS, 1M müşteri) en iyi sonuç **her iki alanın `separate`** olduğu
-yerleşimle alınmıştır (p99 ≈ 9 ms; `colocate` aynı testte p99 ≈ 13 ms).
-Dar node'larda CPU çekişmesi, node içi ağ kazancından daha belirleyicidir.
-Geniş/adanmış node'larda (ör. ≥70 CPU hot-path worker) `colocate`'in
-davranışı henüz ölçülmemiştir — hedef ortamda ayrıca araştırılması önerilir.
+Varsayılan (`values-customer.yaml`): `fraudEnginePlacement: separate`.
 Zorunlu kurallar kullanılıyorsa cluster'da en az 2 worker node olmalıdır.
+
+Dragonfly cluster dışında çalıştığından FM Engine ile arasında pod yerleşim
+kuralı bulunmaz; bağlantı `engine.dragonflyHost` üzerinden ağ katmanında
+kurulur. Engine node'ları ile Dragonfly VM'i arasındaki ağ gecikmesinin düşük
+tutulması (aynı subnet / availability zone) önerilir.
 
 Aşağıdaki tüm komutlar repo kökünden (bu README'nin bulunduğu dizinden, chart
 yolu `./charts/trueguardvision` olacak şekilde) çalıştırılır.
@@ -126,14 +122,20 @@ yüklenen tabandır; üzerine `-f` ile `values-customer.yaml` verilir.
 **Müşteri kurulumu** (üretim boyutlandırması):
 
 Kurulumdan önce `values-customer.yaml` içinde doldurun: `MONGO_VM_IP`,
-`CLICKHOUSE_VM_IP` ve `ChangeMe*` parolaları. Kurulum komutu:
+`CLICKHOUSE_VM_IP`, `engine.dragonflyHost` (Dragonfly VM'inin IP'si) ve
+`ChangeMe*` parolaları. Kurulum komutu:
 
 ```bash
 helm install trueguardvision ./charts/trueguardvision -n fraud-poc --create-namespace \
   -f charts/trueguardvision/values-customer.yaml \
   --set clusterDomain=apps.rosa.altay.6j68.p3.openshiftapps.com \
-  --set imagePullSecret.token=ghp_****
+  --set imagePullSecret.token=ghp_**** \
+  --set engine.dragonflyPassword='<engine ACL sifresi>'
 ```
+
+`engine.dragonflyPassword`, Dragonfly VM'inde tanımlanan `engine` ACL
+kullanıcısının şifresidir; Secret içinde saklanır ve bağlantı URI'sine
+otomatik olarak eklenir.
 
 (Domain örnektir, kendi domain'inizle değiştirin.)
 
@@ -166,7 +168,8 @@ Adım adım:
 helm upgrade trueguardvision ./charts/trueguardvision -n fraud-poc \
   -f charts/trueguardvision/values-customer.yaml \
   --set clusterDomain=apps.<domain> \
-  --set imagePullSecret.token=ghp_****
+  --set imagePullSecret.token=ghp_**** \
+  --set engine.dragonflyPassword='<engine ACL sifresi>'
 ```
 
 3. Ne olacağını bilin: yalnızca spec'i değişen pod'lar yeniden oluşturulur.
@@ -196,13 +199,7 @@ Adım adım tam kaldırma:
 helm uninstall trueguardvision -n fraud-poc
 ```
 
-2. Dragonfly'ın kalıcı diskini silin (aşağıdaki nota bakın):
-
-```bash
-oc delete pvc data-dragonfly-0 -n fraud-poc
-```
-
-3. (İsteğe bağlı) Namespace'i tamamen kaldırın:
+2. (İsteğe bağlı) Namespace'i tamamen kaldırın:
 
 ```bash
 oc delete ns fraud-poc
@@ -211,17 +208,10 @@ oc delete ns fraud-poc
 Yeniden kurulum, Kurulum bölümündeki `helm install` komutuyla yapılır
 (namespace silindiyse `--create-namespace` onu yeniden oluşturur).
 
-Not — `helm uninstall`, Dragonfly'ın kalıcı diskini (PVC) **silmez** — StatefulSet
-`volumeClaimTemplates` ile oluşturulan PVC'ler Helm tarafından yönetilmez ve
-veri koruması amacıyla geride bırakılır (retain davranışı). Yeniden kurulumda
-aynı PVC otomatik bağlanır ve sayaç verisi korunur. Tamamen temizlemek için:
-
-```bash
-oc delete pvc data-dragonfly-0 -n fraud-poc
-```
-
-Not: Dragonfly verisi yeniden üretilebilir niteliktedir (sayaçlar canlı
-trafikle yeniden dolar); kalıcı gerçek veri MongoDB ve ClickHouse'tadır.
+Not: Dragonfly cluster dışında çalıştığı için `helm uninstall` işleminden
+etkilenmez; veri ve ACL tanımları VM üzerinde korunur. Dragonfly verisi
+yeniden üretilebilir niteliktedir (sayaçlar canlı trafikle yeniden dolar);
+kalıcı gerçek veri MongoDB ve ClickHouse'tadır.
 
 ### Üretilecek manifest'leri önizleme
 
@@ -335,7 +325,7 @@ Tüm uygulama pod'larının loglarını tek komutla izlemek için:
 
 ```bash
 oc logs -f -n fraud-poc --all-containers --prefix \
-  -l 'app in (fraudbuster-be,fraudbuster-ui,dragonfly,eventsimulator-engine,eventsimulator-ui)' \
+  -l 'app in (fraudbuster-be,fraudbuster-ui,eventsimulator-engine,eventsimulator-ui)' \
   --max-log-requests=10
 ```
 
@@ -354,13 +344,14 @@ Tek bir bileşeni izlemek için: `oc logs -f deploy/fraudbuster-be -n fraud-poc`
 
 ## 6. Kapsam (OpenShift içi ve dışı)
 
-**OpenShift içinde (bu chart kurar):** FM Engine, FM Portal, Dragonfly,
-Event Simulator (engine + UI), servis/Route tanımları, uygulama secret'ları.
+**OpenShift içinde (bu chart kurar):** FM Engine, FM Portal, Event Simulator
+(engine + UI), servis/Route tanımları, uygulama secret'ları.
 
 **OpenShift dışında (bu chart kurmaz, yalnızca adres olarak referans verir):**
 
 | Bileşen | Referans verilen yer | Gereksinim |
 |---|---|---|
+| Dragonfly | `engine.dragonfly*` alanları | ACL tanımlı olmalı, `engine` kullanıcısının şifresi `--set` ile verilmeli; 6379/TCP cluster node'larına açık (kurulum: [`dragonfly-setup/`](../../dragonfly-setup/dragonfly-setup-guideline-for-audit.md)) |
 | MongoDB | `externalDatabases.mongodb.uri` | Replica set `rs0` zorunlu (change stream'ler için), URI'de `replicaSet=rs0&directConnection=true` korunmalı; 27017/TCP cluster node'larına açık |
 | ClickHouse | `externalDatabases.clickhouse.*` | `events` şeması kurulmuş olmalı (kurulum script'leri ürün paketiyle verilir); 8123/TCP cluster node'larına açık |
 | İmaj registry'si | `imagePullSecret.*` ve `*.image` alanları | ghcr.io'ya çıkış ya da imajların banka registry'sine mirror'ı |
@@ -383,15 +374,17 @@ Event Simulator (engine + UI), servis/Route tanımları, uygulama secret'ları.
 | `externalDatabases.mongodb.database` | `fraudmanagement` | Veritabanı adı |
 | `externalDatabases.clickhouse.url` | örnek değer | ClickHouse HTTP adresi (`http://<ip>:8123`) |
 | `externalDatabases.clickhouse.database/user/password` | `fraudbuster` / `default` / örnek | ClickHouse erişim bilgileri |
-| `dragonfly.image` | `v1.39.0` (pinli) | Sürüm pinlidir; HEXPIRE/HTTL davranış uyumluluğu için değiştirmeden önce üreticiye danışın |
-| `dragonfly.maxmemory` / `proactorThreads` / `storage` | `4gb` / `2` / `10Gi` | Bellek sınırı, iş parçacığı sayısı, PVC boyutu — node kapasitesine göre ölçeklendirin |
+| `engine.dragonflyHost` | `dragonfly` | Dragonfly VM'inin IP adresi ya da hostname'i |
+| `engine.dragonflyPort` | `6379` | Dragonfly portu |
+| `engine.dragonflyUser` | boş | Bağlanılacak ACL kullanıcısı (`engine`). Boş bırakılırsa URI'ye kimlik bilgisi eklenmez |
+| `engine.dragonflyPassword` | boş | ACL şifresi — **values dosyasına yazılmamalı**, `--set` ile verilmelidir. Secret içinde saklanır, URI'ye encode edilerek eklenir |
+| `engine.dragonflyParams` | `pool_size=300&min_idle=50&...` | Bağlantı havuzu ve timeout parametreleri |
 | `engine.image` | `fraudengine:main` | Engine imajı — üretimde sürüm/sha tag'ine pinleyin |
 | `engine.logLevel` / `rustLog` | `info` | Log seviyesi (yük testinde `warn` önerilir) |
 | `engine.bucketTtlSeconds` | `86400` | Sayaç TTL'i |
 | `engine.resources` / `ui.resources` / `simulator.*.resources` | POC değerleri | CPU/RAM istek ve limitleri — hedef TPS'e göre ölçeklendirin |
 | `ui.enablePocReset` | `true` | Portal'daki veri sıfırlama araçları — **üretimde `false` yapılmalıdır** |
-| `engine.dragonflyPlacement` | `separate` | Engine'in Dragonfly'a göre yerleşimi: `colocate` (aynı node) / `separate` (farklı node) / `none` (serbest) — bkz. Kurulum bölümündeki tablo |
-| `simulator.engine.fraudEnginePlacement` | `separate` | Yük üretecinin FM Engine'e göre yerleşimi (aynı üç değer); ölçüm sağlığı için `separate` önerilir |
+| `simulator.engine.fraudEnginePlacement` | `separate` | Yük üretecinin FM Engine'e göre yerleşimi: `colocate` / `separate` / `none`; ölçüm sağlığı için `separate` önerilir |
 | `engine.tuning.*` | compose fallback'leri | **Tuning map**: her satır Engine container'ına environment variable olarak basılır; compose'daki tüm `FRAUDBUSTER_*` performans/bayrak env'leri burada (thread pool, pipeline/kuyruk limitleri, `DISABLE_*` bayrakları, batch boyutları...). Yeni env eklemek chart değişikliği gerektirmez. Bağlantı/kimlik env'leri burada tanımlanamaz — template reddeder |
 | `ui.tuning.*` | compose fallback'leri | UI tuning map'i: `INCIDENTS_FILTER_*` guardrail'leri ve `CLICKHOUSE_MAX_CONNECTIONS` |
 
@@ -411,16 +404,18 @@ mevcuttur.
 - Varsayılan durumda router'ın wildcard sertifikası kullanılır. Bankaya özel
   host adı kullanılacaksa Route'lara kurum sertifikası tanımlanmalıdır
   (`spec.tls.certificate/key`); istenirse chart bu alanlarla genişletilebilir.
-- Cluster içi trafik (Portal→Engine, Engine→Dragonfly) pod ağında kalır ve
-  cluster dışına çıkmaz.
+- Cluster içi trafik (Portal→Engine) pod ağında kalır ve cluster dışına
+  çıkmaz. Engine→Dragonfly trafiği banka iç ağında kalır; erişim ACL kimlik
+  doğrulaması ve ağ kısıtlarıyla denetlenir (bkz. Bölüm 9).
 - Not: Compose kurulumundaki nginx `client_max_body_size 10m` sınırının Route
   karşılığı yoktur (OpenShift router gövde boyutu sınırı uygulamaz); istek
   boyutu sınırlaması gerekiyorsa Route annotation'ları ile eklenebilir.
 
 ### Secret Yönetimi
 
-- JWT anahtarı, ClickHouse şifresi ve admin bilgileri Kubernetes Secret'ında
-  tutulur; ortam değişkeni olarak pod'lara verilir.
+- JWT anahtarı, ClickHouse şifresi, Dragonfly bağlantı URI'si (ACL şifresi
+  dahil) ve admin bilgileri Kubernetes Secret'ında tutulur; ortam değişkeni
+  olarak pod'lara verilir.
 - Doldurulmuş `values-customer.yaml` secret içerdiğinden dosya erişimi
   kısıtlanmalı; tercihen secret'lar `--set` ile ya da harici bir secret yönetimi (Vault,
   Sealed Secrets vb.) ile sağlanmalıdır.
@@ -432,12 +427,13 @@ mevcuttur.
 | Kaynak | Hedef | Port | Amaç |
 |---|---|---|---|
 | Analist / operatör | OpenShift Router | 443/TCP | Portal ve Simulator arayüzleri |
+| Cluster worker node'ları | **Dragonfly VM** | **6379/TCP** | **Sayaç okuma/yazma (skorlamanın sıcak yolu)** |
 | Cluster worker node'ları | MongoDB VM | 27017/TCP | Yapılandırma + incident + change stream |
 | Cluster worker node'ları | ClickHouse VM | 8123/TCP | Event arşivi ve raporlama |
 | Cluster (egress) | İmaj registry'si | 443/TCP | İmaj çekme (mirror kullanılıyorsa banka registry'si) |
 
-- MongoDB/ClickHouse portları yalnızca cluster node subnet'lerine açılmalı,
-  kullanıcı ağlarına kapatılmalıdır.
+- Dragonfly/MongoDB/ClickHouse portları yalnızca cluster node subnet'lerine
+  açılmalı, kullanıcı ağlarına kapatılmalıdır.
 - Pod ve Service CIDR'larının (cluster kurulumunda belirlenir) banka ağıyla
   çakışmaması kurulum sahibinin sorumluluğundadır.
 - Namespace içi/dışı trafiği sınırlamak için NetworkPolicy eklenebilir
@@ -448,5 +444,68 @@ mevcuttur.
 Tüm iş yükleri OpenShift'in varsayılan `restricted-v2` SCC'si ile çalışır;
 özel yetki (privileged container, ek capability, seccomp istisnası)
 **gerektirmez**.
+
+---
+
+## 9. Audit
+
+Platformun kullandığı veri katmanlarında, uygulama dışından yapılan
+erişimlerin kayıt altına alınması için audit yapılandırmaları uygulanır.
+
+### 9.1 Dragonfly Audit
+
+Dragonfly, cluster dışında adanmış bir VM'de standalone olarak çalışır ve
+üzerinde erişim denetimi ile oturum kayıt mekanizması yapılandırılmıştır.
+Amaç, FM Engine dışında bir kullanıcının Dragonfly'a bağlanarak yaptığı tüm
+işlemlerin kayıt altına alınmasıdır.
+
+**Kimlik ayrımı (ACL).** Dragonfly üzerinde her erişim türü için ayrı bir ACL
+kullanıcısı tanımlanmıştır: uygulama için `engine`, yönetici erişimi için
+adlandırılmış hesaplar ve sınırlı operasyonel erişim için yetkileri
+daraltılmış bir hesap. Kimlik doğrulamasız erişimi sağlayan varsayılan hesap
+kapatılmıştır; şifresiz bağlantı kabul edilmez. Tanımlar sunucuda kalıcı
+olarak saklanır ve servis yeniden başlatıldığında korunur.
+
+**Oturum kaydı.** Yönetici erişimi, `dragonfly-audit-cli` wrapper'ı üzerinden
+yapılır. Wrapper her oturum için ayrı bir kayıt dosyası üretir ve şu bilgileri
+tutar:
+
+| Alan | İçerik |
+|---|---|
+| `os_user` | İşlemi yapan Linux kullanıcısı |
+| `dragonfly_user` | Kullanılan Dragonfly ACL hesabı |
+| `source_ip` | Bağlantının geldiği IP adresi |
+| `tty` | Terminal oturumu |
+| `started_at` / `ended_at` | Oturum başlangıç ve bitiş zamanı (ISO 8601) |
+| Oturum içeriği | Girilen tüm komutlar ve Dragonfly'ın döndürdüğü cevaplar |
+
+Kayıtlar `/var/log/dragonfly-audit/` dizininde tutulur. Dizin ve dosyalar
+yalnızca `root` erişimine açıktır ve oluşturuldukları anda append-only olarak
+işaretlenir. Her oturum, zamanlama verisiyle birlikte saklandığı için
+`scriptreplay` ile orijinal hızında yeniden izlenebilir.
+
+**Erişim yolunun tekilleştirilmesi.** Sunucu üzerinde çalışan kullanıcıların
+wrapper'ı atlayarak doğrudan `redis-cli` ile bağlanması, iptables `owner`
+eşleşmesiyle engellenir; yalnızca `root` ve engine servis hesabı için izin
+verilir. Kullanıcıların `sudo` yetkisi tek bir komutla — audit wrapper'ıyla —
+sınırlandırılmıştır. 6379/TCP portu ağ düzeyinde yalnızca cluster
+node'larına açılır.
+
+**Uygulama trafiği.** FM Engine, `engine` ACL kullanıcısıyla doğrudan bağlanır
+ve audit kaydı üretmez. Kayıt mekanizması terminal düzeyinde çalıştığı için
+Dragonfly üzerinde performans maliyeti oluşturmaz.
+
+**Merkezi log entegrasyonu.** Audit kayıtları, `rsyslog` veya kurumun tercih
+ettiği log toplama ajanı ile merkezi log sistemine (SIEM) aktarılabilir.
+Yapılandırma örnekleri kurulum dokümanında yer alır.
+
+**Kurulum ve işletim dokümanı:**
+[`dragonfly-setup/dragonfly-setup-guideline-for-audit.md`](../../dragonfly-setup/dragonfly-setup-guideline-for-audit.md)
+
+| Dosya | Açıklama |
+|---|---|
+| [`dragonfly-setup/dragonfly-setup-guideline-for-audit.md`](../../dragonfly-setup/dragonfly-setup-guideline-for-audit.md) | Dragonfly kurulumu, ACL yapılandırması, audit kurulumu, doğrulama testleri ve periyodik kontroller |
+| [`dragonfly-setup/dragonfly-audit-cli.sh`](../../dragonfly-setup/dragonfly-audit-cli.sh) | Audit wrapper script'i |
+| [`dragonfly-setup/setup-dragonfly-firewall`](../../dragonfly-setup/setup-dragonfly-firewall) | Firewall kurallarını uygulayan script |
 
 ---

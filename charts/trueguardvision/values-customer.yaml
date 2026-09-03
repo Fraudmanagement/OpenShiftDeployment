@@ -72,8 +72,6 @@ engine:
   #   tolerations: [{ key: fm-hotpath, operator: Equal, value: "true", effect: NoSchedule }]
   nodeSelector: {}
   tolerations: []
-  # Dragonfly'a göre yerleşim: colocate (aynı node) | separate (farklı node) | none (serbest)
-  dragonflyPlacement: "separate"
   resources:
     requests:
       cpu: "32"

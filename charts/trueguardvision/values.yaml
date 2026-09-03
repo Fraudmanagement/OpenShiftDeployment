@@ -30,21 +30,8 @@ externalDatabases:
     user: "default"
     password: "ChangeMeClickHouse!"
 
-dragonfly:
-  image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.39.0
-  pullPolicy: "Always"
-  maxmemory: "4gb"
-  proactorThreads: 4
-  storage: 10Gi
-  nodeSelector: {}
-  tolerations: []
-  resources:
-    requests:
-      cpu: "1"
-      memory: 4Gi
-    limits:
-      cpu: "2"
-      memory: 6Gi
+# NOT: Dragonfly artık chart tarafından deploy EDİLMİYOR — cluster dışı bir VM'de
+# standalone çalışıyor. Bağlantı ayarları engine.dragonfly* alanlarındadır.
 
 engine:
   image: ghcr.io/fraudmanagement/fraudengine:main
@@ -55,15 +42,19 @@ engine:
   rustBacktrace: "1"
   serverPort: "5432"        # Service/Route/probe portlarıyla birlikte düşünülmeli
   pluginDir: "/app/plugins"
-  redisUri: "redis://dragonfly:6379?pool_size=300&min_idle=50&connection_timeout=3&response_timeout=5"
+  # Dragonfly bağlantısı — URI templates/secrets.yaml içinde birleştirilir.
+  # dragonflyUser boş bırakılırsa URI'ye kimlik bilgisi eklenmez (ACL'siz sunucu).
+  dragonflyHost: "dragonfly"
+  dragonflyPort: 6379
+  dragonflyUser: ""
+  dragonflyPassword: ""     # ACL şifresi — dosyaya yazmayın, --set ile verin
+  dragonflyParams: "pool_size=300&min_idle=50&connection_timeout=3&response_timeout=5"
   bucketTtlSeconds: "86400"
   enableChangeStreams: "true"
   # Deployment güncelleme davranışı: Recreate (önce eskiyi kaldır — dar cluster için) | RollingUpdate
   updateStrategy: "Recreate"
   nodeSelector: {}
   tolerations: []
-  # Dragonfly'a göre yerleşim: colocate (aynı node) | separate (farklı node) | none (serbest)
-  dragonflyPlacement: "none"
   resources:
     requests:
       cpu: "2"
