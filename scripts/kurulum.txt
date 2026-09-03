@@ -5,11 +5,31 @@ KURULUM
 Kurulum dosyalarını yükle
 -------------------------
 scp ./{setup-mongodb.sh,setup-clickhouse.sh,clickhouse-01-init.sql,clickhouse-02-views.sql} ubuntu@23.20.143.219:
+scp ./setup-percona-mongodb.sh ubuntu@3.91.26.24:
 
 Makineye bağlan ve sırasıyla MongoDB ve ClickHouse kurulum scriptlerini çalıştır
 --------------------------------------------------------------------------------
 sudo bash /home/ubuntu/setup-mongodb.sh
 sudo bash /home/ubuntu/setup-clickhouse.sh 'Test123!'
+
+Percona
+-------
+openssl rand -base64 24; openssl rand -base64 24
+hEifC9JB+RQp5Xj++oeeBQznx5CJXUgG
+b3rnacGEVL7yME35ZpiNLHnPWuPveDL1
+
+AdminSifre: hEifC9JB+RQp5Xj++oeeBQznx5CJXUgG
+AppSifre:   b3rnacGEVL7yME35ZpiNLHnPWuPveDL1
+sudo bash /home/ubuntu/setup-percona-mongodb.sh 'hEifC9JB+RQp5Xj++oeeBQznx5CJXUgG' 'b3rnacGEVL7yME35ZpiNLHnPWuPveDL1'
+
+Kontrol et Percona'yi;
+----------------------
+sudo apt install -y jq
+sudo tail -n 3 /var/log/mongodb/audit.json | jq .
+
+ubuntu@perconadb:~$ hostname -I
+172.31.36.102 
+
 
 Sunucu'da Dışarıya Erişim Verilmesi Gereken Port'lar
 ----------------------------------------------------
